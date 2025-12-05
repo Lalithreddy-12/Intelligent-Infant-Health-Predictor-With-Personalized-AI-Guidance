@@ -1,4 +1,4 @@
-# Child Mortality Prediction Demo (Backend + Frontend)
+# Intelligent Infant Health Predictor With Personalized AI Guidance (Backend + Frontend)
 
 This is a minimal demo application inspired by the project paper you provided. It includes a Flask backend exposing a `/api/predict` endpoint and a static frontend (`static/index.html`) that consumes it.
 
