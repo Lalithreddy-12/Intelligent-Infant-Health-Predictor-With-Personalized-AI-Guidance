@@ -1,9 +1,7 @@
-# app.py
 import os
 import json
 import re
 import time
-import traceback
 from functools import lru_cache
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_from_directory
@@ -12,13 +10,12 @@ import joblib
 import pandas as pd
 import logging
 
-# --- Load environment variables ---
+# === Config ===
 load_dotenv()
 HF_API_KEY = os.getenv("HF_API_KEY")
 HF_MODEL = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
-# If you prefer not to require HF, set this to False. For your request, we require HF.
-if not HF_API_KEY:
-    raise ValueError("HF_API_KEY not found in .env file")
+# Maximum items allowed per year (increase if you want more)
+MAX_ITEMS_PER_YEAR = int(os.getenv("MAX_ITEMS_PER_YEAR", "12"))
 
 # --- Logging ---
 logger = logging.getLogger("child_mortality")
@@ -27,189 +24,340 @@ handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
 
-# --- Initialize Hugging Face client (best-effort) ---
-try:
-    client = InferenceClient(api_key=HF_API_KEY, timeout=120)
-    logger.info("Initialized Hugging Face InferenceClient.")
-except Exception as e:
-    client = None
-    logger.exception("Failed to initialize InferenceClient: %s", e)
+# --- HF Client ---
+client = None
+if HF_API_KEY:
+    try:
+        client = InferenceClient(api_key=HF_API_KEY, timeout=120)
+        logger.info("Initialized Hugging Face InferenceClient.")
+    except Exception as e:
+        logger.exception("Failed HF init: %s", e)
+else:
+    logger.warning("HF API key missing — fallback mode only")
 
-# --- Flask app setup ---
-APP_DIR = os.path.dirname(__file__)
-MODEL_PATH = os.path.join(APP_DIR, "models", "model.pkl")
+# --- Flask app + model loader ---
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "model.pkl")
 
-# --- Load local ML model ---
 def load_model():
     if os.path.exists(MODEL_PATH):
         try:
             m = joblib.load(MODEL_PATH)
-            logger.info("Loaded local model from %s", MODEL_PATH)
-            return m
+            return m["pipeline"] if isinstance(m, dict) and "pipeline" in m else m
         except Exception as e:
-            logger.exception("❌ Failed to load local model: %s", e)
+            logger.exception("Model load failed: %s", e)
     else:
-        logger.warning("No local model found at %s", MODEL_PATH)
+        logger.warning("Model file not found at %s", MODEL_PATH)
     return None
 
 model = load_model()
 
-# --- Build input DataFrame ---
-def _build_input_df(data):
+# === Input validation ===
+def validate_and_build_df(data: dict):
+    required = ["birth_weight", "maternal_age", "immunized", "nutrition", "socioeconomic", "prenatal_visits"]
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ValueError(f"Missing required fields: {missing}")
     try:
         return pd.DataFrame([{
-            "birth_weight": float(data.get("birth_weight")),
-            "maternal_age": float(data.get("maternal_age")),
-            "immunized": int(data.get("immunized")),
-            "nutrition": float(data.get("nutrition")),
-            "socioeconomic": int(data.get("socioeconomic")),
-            "prenatal_visits": float(data.get("prenatal_visits"))
+            "birth_weight": float(data["birth_weight"]),
+            "maternal_age": float(data["maternal_age"]),
+            "immunized": int(data["immunized"]),
+            "nutrition": float(data["nutrition"]),
+            "socioeconomic": int(data["socioeconomic"]),
+            "prenatal_visits": float(data["prenatal_visits"])
         }])
     except Exception as e:
-        raise ValueError(f"Invalid input format or missing field: {e}")
+        raise ValueError(f"Invalid data format: {e}")
 
-# --- Fallback survival plan ---
+# === Fallback plan ===
 def generate_fallback_plan():
     return {
         "risk_level": "high",
         "years": {
             "Year 0-1": ["Doctor visits", "Vaccinations", "Monitor growth and nutrition"],
             "Year 1-2": ["Regular checkups", "Balanced diet", "Monitor development milestones"],
-            "Year 2-3": ["Speech and motor skill support", "Vaccinations update", "Nutritional supplements if needed"],
+            "Year 2-3": ["Speech and motor skill support", "Vaccinations update", "Nutritional supplements"],
             "Year 3-4": ["School readiness assessment", "Preventive health checks", "Encourage physical activity"],
             "Year 4-5": ["Annual pediatric screening", "Vaccinations", "Healthy lifestyle counseling"]
         },
         "warning": "Used fallback plan due to HF API failure or parsing error."
     }
 
-# --- Helper: parse JSON / free-text to structured plan ---
+EXPECTED_KEYS = ["Year 0-1", "Year 1-2", "Year 2-3", "Year 3-4", "Year 4-5"]
+
+# === Parser helpers ===
+def _normalize_year_key(key_text):
+    nums = re.findall(r"\d+", key_text)
+    if len(nums) >= 2:
+        return f"Year {nums[0]}-{nums[1]}"
+    return None
+
+def _map_json_to_expected(plan_json):
+    mapped = {}
+    # direct keys
+    for ek in EXPECTED_KEYS:
+        if ek in plan_json:
+            mapped[ek] = plan_json[ek]
+    # normalized keys
+    for k, v in plan_json.items():
+        nk = _normalize_year_key(k)
+        if nk and nk in EXPECTED_KEYS and nk not in mapped:
+            mapped[nk] = v
+    return mapped
+
+# === Robust parser (repair JSON, trimming, language filter) ===
 def _parse_plan_from_text(raw_text):
-    expected_keys = ["Year 0-1", "Year 1-2", "Year 2-3", "Year 3-4", "Year 4-5"]
     default_steps = list(generate_fallback_plan()["years"].values())
-
     if not raw_text or not isinstance(raw_text, str):
-        return {k: default_steps[i] for i, k in enumerate(expected_keys)}
+        return {k: default_steps[i] for i, k in enumerate(EXPECTED_KEYS)}
 
-    # 1) Try to locate a JSON object block
-    try:
-        m = re.search(r"\{(?:[^{}]|\n|\r)*\}", raw_text, flags=re.S)
-        if m:
-            candidate = m.group(0)
-            plan_json = json.loads(candidate)
+    text = raw_text.strip()
+
+    # 1) Extract first balanced JSON object
+    start_idx = text.find("{")
+    json_candidate = None
+    if start_idx != -1:
+        depth = 0
+        for i in range(start_idx, len(text)):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    json_candidate = text[start_idx:i+1]
+                    break
+
+    def try_load_and_map(s):
+        try:
+            parsed = json.loads(s)
+            mapped = _map_json_to_expected(parsed)
             cleaned = {}
-            for i, k in enumerate(expected_keys):
-                v = plan_json.get(k)
+            for i, ek in enumerate(EXPECTED_KEYS):
+                v = mapped.get(ek)
                 if isinstance(v, list) and len(v) > 0:
-                    cleaned[k] = [str(x).strip() for x in v][:5]
+                    # keep up to the configured maximum
+                    cleaned[ek] = [str(x).strip() for x in v][:MAX_ITEMS_PER_YEAR]
                 else:
-                    cleaned[k] = default_steps[i]
+                    cleaned[ek] = default_steps[i]
             return cleaned
-    except Exception:
-        # fall through to heuristics
-        pass
+        except Exception:
+            return None
 
-    # 2) Heuristic: look for headings like "Year 0-1" and bullets following them
+    # Try candidate JSON and repairs
+    if json_candidate:
+        out = try_load_and_map(json_candidate)
+        if out:
+            logger.debug("Parser: used balanced JSON candidate.")
+            return out
+
+        # remove trailing commas before ] or }
+        repaired = re.sub(r",(\s*[\]\}])", r"\1", json_candidate)
+        out = try_load_and_map(repaired)
+        if out:
+            logger.debug("Parser: repaired trailing commas and parsed JSON.")
+            return out
+
+        # strip non-ascii/control that may break JSON
+        cleaned_candidate = "".join(ch for ch in repaired if (31 < ord(ch) < 127) or ch in "\n\r\t")
+        out = try_load_and_map(cleaned_candidate)
+        if out:
+            logger.debug("Parser: removed non-ASCII and parsed JSON.")
+            return out
+
+        # try replace single quotes with double quotes only if it looks appropriate
+        if "'" in json_candidate and '"' not in json_candidate:
+            alt = json_candidate.replace("'", '"')
+            alt = re.sub(r",(\s*[\]\}])", r"\1", alt)
+            out = try_load_and_map(alt)
+            if out:
+                logger.debug("Parser: replaced single quotes and parsed JSON.")
+                return out
+
+        logger.debug("Parser: found JSON-like block but could not parse/repair it.")
+
+    # 2) Headings heuristic fallback (trim and language-safety)
     try:
-        text = "\n".join([ln.strip() for ln in raw_text.splitlines() if ln.strip()])
-        # Find headings and their positions
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        joined = "\n".join(lines)
         heading_re = re.compile(r"(Year\s*\d+\s*(?:-|to|–)\s*\d+)", flags=re.I)
-        headings = [(m.group(1).strip(), m.start()) for m in heading_re.finditer(text)]
+        headings = [(m.group(1).strip(), m.start()) for m in heading_re.finditer(joined)]
         if headings:
-            # build sections
             sections = {}
-            positions = [pos for (_, pos) in headings] + [len(text)]
+            positions = [pos for (_, pos) in headings] + [len(joined)]
             keys = [h for (h, _) in headings]
             for idx, key in enumerate(keys):
                 start = positions[idx]
                 end = positions[idx + 1]
-                seg = text[start:end].strip()
-                # drop the heading line
+                seg = joined[start:end].strip()
                 seg_lines = seg.splitlines()
                 body = "\n".join(seg_lines[1:]) if len(seg_lines) > 1 else ""
                 # split by bullets/newlines/commas/semicolons
                 items = re.split(r"[\n\r]+|[•\-\*\u2022]+|[;,\|]\s*", body)
                 items = [it.strip() for it in items if it and len(it.strip()) > 2]
-                sections[key] = items
 
-            # Map found sections to expected keys using digit matching
+                safe_items = []
+                for it in items:
+                    if len(safe_items) >= MAX_ITEMS_PER_YEAR:
+                        break
+                    # skip extremely long paragraphs (likely unrelated)
+                    if len(it) > 160:
+                        continue
+                    # basic ascii-language heuristic: prefer mostly-ascii short items
+                    ascii_ratio = sum(1 for ch in it if ord(ch) < 128) / max(1, len(it))
+                    if ascii_ratio < 0.55 and len(it.split()) > 6:
+                        continue
+                    safe_items.append(it)
+                sections[key] = safe_items
+
             cleaned = {}
-            for i, ek in enumerate(expected_keys):
+            for i, ek in enumerate(EXPECTED_KEYS):
                 ek_nums = re.findall(r"\d+", ek)
                 found = None
                 for pk, val in sections.items():
                     if re.findall(r"\d+", pk) == ek_nums and val:
                         found = val
                         break
-                cleaned[ek] = found[:5] if found else default_steps[i]
+                cleaned[ek] = found[:MAX_ITEMS_PER_YEAR] if found else default_steps[i]
+            logger.debug("Parser: used headings heuristic with trimming.")
             return cleaned
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Parser heuristic failed: %s", e)
 
-    # 3) Fallback heuristic: split by "Year " token
-    try:
-        parts = re.split(r"(?:Year\s*\d+\s*(?:-|to|–)\s*\d+)", text, flags=re.I)
-        hdrs = re.findall(r"(Year\s*\d+\s*(?:-|to|–)\s*\d+)", text, flags=re.I)
-        heuristic = {}
-        for i, hdr in enumerate(hdrs):
+    # 3) Last resort: defaults
+    logger.debug("Parser: returning default fallback plan.")
+    return {k: default_steps[i] for i, k in enumerate(EXPECTED_KEYS)}
+
+# =============================================================
+# HF caller — uses EXACT system prompt text provided by user
+# =============================================================
+USER_SYSTEM_PROMPT = (
+    "You are a pediatric health assistant and clinical decision-support assistant. \n"
+    "Your role is to generate HIGH-QUALITY, EVIDENCE-INFORMED guidance for reducing infant/child mortality risk.\n\n"
+    "IMPORTANT RULES — FOLLOW STRICTLY:\n"
+    "1. OUTPUT **ONLY ONE JSON OBJECT** and NOTHING ELSE.\n"
+    "2. The JSON MUST contain exactly these keys:\n"
+    "   \"Year 0-1\", \"Year 1-2\", \"Year 2-3\", \"Year 3-4\", \"Year 4-5\".\n"
+    "3. Each key MUST map to an array (list) of SHORT, ACTIONABLE, CLINICALLY SAFE steps.\n"
+    "4. Provide **5 to 12 steps per year**. Always prefer medically relevant, risk-reducing, practical actions.\n"
+    "5. PERSONALIZE the guidance based on the child’s features (birth weight, maternal age, immunization status, nutrition score, socioeconomic status, prenatal visits, etc.).\n"
+    "6. GUIDANCE MUST BE RISK-FOCUSED:\n"
+    "      - Emphasize infection prevention,\n"
+    "      - Growth monitoring,\n"
+    "      - Nutrition optimization,\n"
+    "      - Early detection of developmental delays,\n"
+    "      - Vaccination details,\n"
+    "      - Hospital referral red flags,\n"
+    "      - Safety and hygiene,\n"
+    "      - Maternal health and family counseling.\n"
+    "7. DO NOT hallucinate medicines, diagnoses, or treatments. \n"
+    "   Provide **general personalized preventive and supportive recommendations based on the child’s features (birth weight, maternal age, immunization status, nutrition score, socioeconomic status, prenatal visits, etc.) only**.\n"
+    "8. DO NOT include disclaimers, explanations, reasoning, or text outside the JSON.\n"
+    "9. DO NOT wrap JSON in code blocks. Output MUST start with \"{\" and end with \"}\" with no additional content.\n\n"
+    "Your task:\n"
+    "Given the child's risk factors, generate a **comprehensive, personalized survival & care plan** designed to REDUCE MORTALITY for HIGH-RISK infants/children through age 5.\n\n"
+    "Example JSON TEMPLATE (structure only; fill with your own medically-safe steps):\n"
+    "{\n"
+    "  \"Year 0-1\": [\"step1\", \"step2\", ...],\n"
+    "  \"Year 1-2\": [\"step1\", \"step2\", ...],\n"
+    "  \"Year 2-3\": [\"step1\", \"step2\", ...],\n"
+    "  \"Year 3-4\": [\"step1\", \"step2\", ...],\n"
+    "  \"Year 4-5\": [\"step1\", \"step2\", ...]\n"
+    "}\n\n"
+    "If you cannot produce the required JSON, output an empty JSON object: {}\n"
+)
+
+def _generate_survival_plan_hf_uncached(features, model_name=HF_MODEL, max_retries=1):
+    if client is None:
+        logger.warning("HF client not initialized; returning fallback.")
+        return generate_fallback_plan(), {"hf_raw": None, "error": "no_client"}
+
+    baby_info = ", ".join([f"{k}: {v}" for k, v in features.items()])
+
+    # Build messages using the exact system prompt supplied
+    messages = [
+        {"role": "system", "content": USER_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Child features: {baby_info}. Generate the JSON exactly as above."}
+    ]
+
+    last_raw = None
+    for attempt in range(1, max_retries + 2):
+        try:
+            logger.debug("Calling HF model=%s attempt=%d", model_name, attempt)
+            start = time.time()
+            resp = client.chat_completion(model=model_name, messages=messages, max_tokens=1200, temperature=0.0)
+            elapsed = time.time() - start
+
             try:
-                body = parts[i + 1]
+                raw_text = resp.choices[0].message["content"]
             except Exception:
-                body = ""
-            items = re.split(r"[\n\r]+|[•\-\*\u2022]+|[;,\|]\s*", body)
-            items = [it.strip() for it in items if it and len(it.strip()) > 2]
-            heuristic[hdr] = items
-        cleaned = {}
-        for i, ek in enumerate(expected_keys):
-            ek_nums = re.findall(r"\d+", ek)
-            found = None
-            for pk, val in heuristic.items():
-                if re.findall(r"\d+", pk) == ek_nums and val:
-                    found = val
-                    break
-            cleaned[ek] = found[:5] if found else default_steps[i]
-        return cleaned
-    except Exception:
-        pass
+                raw_text = str(resp)
+            last_raw = (raw_text or "")[:32000]
+            logger.debug("HF responded in %.2fs; raw-trunc=%s", elapsed, last_raw[:400].replace("\n", " "))
 
-    # 4) Last resort: return defaults
-    return {k: default_steps[i] for i, k in enumerate(expected_keys)}
+            # Parse into structured plan
+            parsed = _parse_plan_from_text(raw_text)
+            if parsed:
+                # Ensure each year has between 5 and MAX_ITEMS_PER_YEAR items where possible
+                for k in EXPECTED_KEYS:
+                    lst = parsed.get(k, [])
+                    # pad with fallback items if fewer than 5
+                    if len(lst) < 5:
+                        fallback = generate_fallback_plan()["years"][k]
+                        # append until 5 or until fallback exhausted
+                        to_add = []
+                        for item in fallback:
+                            if item not in lst:
+                                to_add.append(item)
+                            if len(lst) + len(to_add) >= 5:
+                                break
+                        parsed[k] = lst + to_add
+                    # trim to MAX_ITEMS_PER_YEAR
+                    parsed[k] = parsed[k][:MAX_ITEMS_PER_YEAR]
+                return {"risk_level": "high", "years": parsed}, {"hf_raw": last_raw}
+            else:
+                return generate_fallback_plan(), {"hf_raw": last_raw, "error": "parsed_empty"}
 
-# --- Cache wrapper to avoid repeated identical HF calls ---
+        except Exception as exc:
+            logger.exception("HF call attempt %d failed: %s", attempt, exc)
+            last_raw = (str(exc) + "\n" + (last_raw or ""))[:32000]
+            if attempt <= max_retries:
+                time.sleep(2 ** attempt)
+                continue
+            return generate_fallback_plan(), {"hf_raw": last_raw, "error": str(exc)}
+
+    return generate_fallback_plan(), {"hf_raw": last_raw, "error": "max_retries_exceeded"}
+
+# === Caching wrapper (include model in key) ===
 @lru_cache(maxsize=256)
-def _cached_generate_plan_tuple(features_tuple):
-    # features_tuple must be a tuple of ordered feature values
+def _cached_generate_plan_tuple(features_tuple_with_model):
     features = {
-        "birth_weight": features_tuple[0],
-        "maternal_age": features_tuple[1],
-        "immunized": features_tuple[2],
-        "nutrition": features_tuple[3],
-        "socioeconomic": features_tuple[4],
-        "prenatal_visits": features_tuple[5]
+        "birth_weight": features_tuple_with_model[0],
+        "maternal_age": features_tuple_with_model[1],
+        "immunized": features_tuple_with_model[2],
+        "nutrition": features_tuple_with_model[3],
+        "socioeconomic": features_tuple_with_model[4],
+        "prenatal_visits": features_tuple_with_model[5]
     }
     plan, debug = _generate_survival_plan_hf_uncached(features)
-    # return JSON-serializable
     return json.dumps((plan, debug))
 
 def generate_survival_plan_hf(features):
-    """
-    Public wrapper: uses LRU cache keyed by feature tuple, returns plan dict and debug dict.
-    """
-    # build deterministic tuple as cache key
     tup = (
         float(features.get("birth_weight", 0.0)),
         float(features.get("maternal_age", 0.0)),
         int(features.get("immunized", 0)),
         float(features.get("nutrition", 0.0)),
         int(features.get("socioeconomic", 0)),
-        float(features.get("prenatal_visits", 0.0))
+        float(features.get("prenatal_visits", 0.0)),
+        HF_MODEL
     )
     try:
         cached = _cached_generate_plan_tuple(tup)
         plan, debug = json.loads(cached)
         return plan, debug
     except Exception:
-        # If cache decoding fails, call uncached function
         return _generate_survival_plan_hf_uncached({
             "birth_weight": tup[0],
             "maternal_age": tup[1],
@@ -219,76 +367,7 @@ def generate_survival_plan_hf(features):
             "prenatal_visits": tup[5]
         })
 
-def _generate_survival_plan_hf_uncached(features, model_name=HF_MODEL, max_retries=1):
-    """
-    The robust HF caller (uncached). Returns (plan_dict, debug_dict).
-    """
-    if client is None:
-        logger.warning("InferenceClient not initialized; returning fallback.")
-        return generate_fallback_plan(), {"hf_raw": None, "error": "no_client"}
-
-    baby_info = ", ".join([f"{k}: {v}" for k, v in features.items()])
-
-    # Strong prompt with explicit JSON template
-    system_prompt = (
-        "You are a pediatric health assistant. PRODUCE EXACTLY ONE JSON OBJECT AND NOTHING ELSE.\n"
-        "The JSON object must contain exactly these keys: "
-        "'Year 0-1', 'Year 1-2', 'Year 2-3', 'Year 3-4', 'Year 4-5'.\n"
-        "Each key's value must be an array (list) of 3 to 5 short actionable steps (strings).\n"
-        "Do NOT include explanations, commentary, or any other text. Do NOT wrap output in Markdown or code fences.\n"
-        "If you cannot produce the requested JSON, output a single empty JSON object: {}.\n\n"
-        "EXAMPLE TEMPLATE (fill arrays with actual steps):\n"
-        '{\n'
-        '  "Year 0-1": ["step1", "step2", "step3"],\n'
-        '  "Year 1-2": ["step1", "step2", "step3"],\n'
-        '  "Year 2-3": ["step1", "step2", "step3"],\n'
-        '  "Year 3-4": ["step1", "step2", "step3"],\n'
-        '  "Year 4-5": ["step1", "step2", "step3"]\n'
-        '}\n'
-    )
-
-    user_prompt = f"Child features: {baby_info}. Generate the JSON exactly as above."
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
-    ]
-
-    last_raw = None
-    for attempt in range(1, max_retries + 2):
-        try:
-            logger.debug("Calling HF model=%s attempt=%d", model_name, attempt)
-            start = time.time()
-            resp = client.chat_completion(model=model_name, messages=messages, max_tokens=700)
-            elapsed = time.time() - start
-
-            # extract raw text
-            try:
-                raw_text = resp.choices[0].message["content"]
-            except Exception:
-                raw_text = str(resp)
-            last_raw = (raw_text or "")[:8000]
-            logger.debug("HF responded in %.2fs; raw-trunc=%s", elapsed, last_raw[:400].replace("\n", " "))
-
-            # Parse into structured plan
-            parsed = _parse_plan_from_text(raw_text)
-            if parsed:
-                return {"risk_level": "high", "years": parsed}, {"hf_raw": last_raw}
-            else:
-                # if parsed is empty, return fallback with debug
-                return generate_fallback_plan(), {"hf_raw": last_raw, "error": "parsed_empty"}
-
-        except Exception as exc:
-            logger.exception("HF call attempt %d failed: %s", attempt, exc)
-            last_raw = (str(exc) + "\n" + (last_raw or ""))[:8000]
-            if attempt <= max_retries:
-                time.sleep(2 ** attempt)
-                continue
-            return generate_fallback_plan(), {"hf_raw": last_raw, "error": str(exc)}
-
-    return generate_fallback_plan(), {"hf_raw": last_raw, "error": "max_retries_exceeded"}
-
-# --- Survival plan selector ---
+# === Survival plan selector ===
 def survival_plan(prediction, features=None, debug=False):
     if int(prediction) == 0:
         return {"risk_level": "low", "message": "Low risk. Continue preventive care: vaccines, nutrition, safe environment."}, {"branch": "low"}
@@ -299,35 +378,52 @@ def survival_plan(prediction, features=None, debug=False):
         else:
             return generate_fallback_plan(), {"branch": "high", "hf_raw": None, "error": "no_features"}
 
-# --- Flask routes ---
+# === Routes ===
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "model_loaded": model is not None})
+
+@app.route("/admin/reload_model", methods=["POST"])
+def reload_model():
+    global model
+    model = load_model()
+    return jsonify({"reloaded": model is not None})
 
 @app.route("/api/predict", methods=["POST"])
 def predict_api():
     global model
     if model is None:
-        return jsonify({"error": "Local model not found. Please train it or rely on HF_API_KEY."}), 500
+        return jsonify({"error": "Local model not found. Please train it or place models/model.pkl"}), 500
 
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "No JSON body provided"}), 400
 
-    # check debug toggle: query param ?debug=true or body { "debug": true }
     q_debug = request.args.get("debug", "").lower() == "true"
     body_debug = bool(data.get("debug")) if isinstance(data, dict) else False
     debug_flag = q_debug or body_debug
 
     try:
-        df = _build_input_df(data)
+        df = validate_and_build_df(data)
     except ValueError as e:
         return jsonify({"error": "Invalid input format", "details": str(e)}), 400
 
-    prob = float(model.predict_proba(df)[:, 1][0]) if hasattr(model, "predict_proba") else None
-    pred = int(model.predict(df)[0])
-    features = df.iloc[0].to_dict()
+    try:
+        prob = None
+        try:
+            prob = float(model.predict_proba(df)[:, 1][0])
+        except Exception:
+            prob = None
+        pred = int(model.predict(df)[0])
+    except Exception as e:
+        logger.exception("Model inference failed: %s", e)
+        return jsonify({"error": "Model inference failed", "details": str(e)}), 500
 
+    features = df.iloc[0].to_dict()
     plan_obj, debug_info = survival_plan(pred, features, debug=debug_flag)
 
     response = {
@@ -341,7 +437,7 @@ def predict_api():
     if debug_flag:
         hf_raw = debug_info.get("hf_raw")
         if hf_raw:
-            response["debug"]["hf_raw_truncated"] = hf_raw[:3000]
+            response["debug"]["hf_raw_truncated"] = hf_raw[:8000]
         if "error" in debug_info:
             response["debug"]["error"] = debug_info["error"]
 
@@ -351,7 +447,7 @@ def predict_api():
 def predict_alias():
     return predict_api()
 
-# --- Run server ---
+# === Run server ===
 if __name__ == "__main__":
     print("🚀 Starting Child Mortality API server on http://127.0.0.1:8000 ")
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=False)
