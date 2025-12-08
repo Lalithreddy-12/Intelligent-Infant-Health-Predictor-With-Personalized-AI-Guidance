@@ -609,13 +609,6 @@ async function showPlan(planObj){
     card.innerHTML = `<h4 class="font-semibold text-primary">General Precautions</h4><ul class="mt-2 text-sm text-gray-700 dark:text-gray-200 space-y-1">${bullets.map(a=>`<li>• ${escapeHtml(a)}</li>`).join('')}</ul>`;
     planContainer.appendChild(card);
     return;
-  } else if (risk === 'high') {
-    // Handle high risk case with survival plan generation
-    const survivalPlan = planObj.survival_plan || [];
-    const card = document.createElement('div');
-    card.className = 'plan-card bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700';
-    card.innerHTML = `<h4 class="font-semibold text-primary">Survival Plan</h4><ul class="mt-2 text-sm text-gray-700 dark:text-gray-200 space-y-1>${survivalPlan.map(a=>`<li>• ${escapeHtml(a)}</li>`).join('')}</ul>`;
-    planContainer.appendChild(card);
   }
 
   const years = planObj?.years || {};

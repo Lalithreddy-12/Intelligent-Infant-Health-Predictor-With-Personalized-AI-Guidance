@@ -30,7 +30,7 @@ except Exception:
 load_dotenv()
 HF_API_KEY = os.getenv("HF_API_KEY")
 HF_MODEL = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
-MAX_ITEMS_PER_YEAR = int(os.getenv("MAX_ITEMS_PER_YEAR", "12"))
+MAX_ITEMS_PER_YEAR = int(os.getenv("MAX_ITEMS_PER_YEAR", "8"))
 
 MAJOR_PCT = float(os.getenv("MAJOR_PCT", "35.0"))
 MODERATE_PCT = float(os.getenv("MODERATE_PCT", "12.0"))
@@ -216,9 +216,46 @@ def _parse_plan_from_text(raw_text):
             for i, ek in enumerate(EXPECTED_KEYS):
                 v = mapped.get(ek)
                 if isinstance(v, list) and len(v) > 0:
-                    cleaned[ek] = [str(x).strip() for x in v][:MAX_ITEMS_PER_YEAR]
+                    # Clean each item: strip whitespace and quotes, filter short items and duplicates
+                    cleaned_items = []
+                    seen = set()
+                    for item in v:
+                        it = str(item).strip().strip('"\'')  # Remove surrounding quotes
+                        # Skip incomplete sentences ending with space + dot
+                        if it.rstrip().endswith((' .', ' ..', '...')):
+                            it = it.rstrip().rstrip('. ')
+                        # Skip if too short (less than 10 chars or 3 words = not valuable)
+                        if not it or len(it) < 10 or len(it.split()) < 3:
+                            continue
+                        # Skip if too long (likely malformed)
+                        if len(it) > 160:
+                            continue
+                        # Skip duplicates
+                        it_lower = it.lower()
+                        if it_lower in seen:
+                            continue
+                        seen.add(it_lower)
+                        cleaned_items.append(it)
+                    # Use cleaned items if available, otherwise fallback
+                    if cleaned_items:
+                        cleaned[ek] = cleaned_items[:MAX_ITEMS_PER_YEAR]
+                    else:
+                        cleaned[ek] = default_steps[i]
                 else:
                     cleaned[ek] = default_steps[i]
+            
+            # Cross-year deduplication: remove items that appear in multiple years
+            all_seen_lower = {}
+            for ek in EXPECTED_KEYS:
+                items_list = cleaned[ek]
+                unique_items = []
+                for it in items_list:
+                    it_lower = it.lower()
+                    if it_lower not in all_seen_lower:
+                        unique_items.append(it)
+                        all_seen_lower[it_lower] = ek
+                cleaned[ek] = unique_items
+            
             return cleaned
         except Exception:
             return None
@@ -263,16 +300,37 @@ def _parse_plan_from_text(raw_text):
                 seg_lines = seg.splitlines()
                 body = "\n".join(seg_lines[1:]) if len(seg_lines) > 1 else ""
                 items = re.split(r"[\n\r]+|[•\-\*\u2022]+|[;,\|]\s*", body)
-                items = [it.strip() for it in items if it and len(it.strip()) > 2]
+                # Filter and clean items
                 safe_items = []
+                seen = set()
                 for it in items:
-                    if len(safe_items) >= MAX_ITEMS_PER_YEAR:
-                        break
+                    it = it.strip().strip('"\'')  # Remove surrounding quotes
+                    # Skip empty or items with only whitespace/quotes
+                    if not it or it in ['""', "''", '"-"', "'-'"]:
+                        continue
+                    # Skip incomplete sentences (ending with space + dot or only dots)
+                    if it.rstrip().endswith((' .', ' ..', '...')):
+                        it = it.rstrip().rstrip('. ')
+                    if not it or len(it) < 10:  # Ensure meaningful content (10+ chars)
+                        continue
+                    # Skip if too short (less than 3 words = less than valuable)
+                    if len(it.split()) < 3:
+                        continue
+                    # Skip if too long (likely malformed)
                     if len(it) > 160:
                         continue
+                    # Skip non-ASCII content
                     ascii_ratio = sum(1 for ch in it if ord(ch) < 128) / max(1, len(it))
                     if ascii_ratio < 0.55 and len(it.split()) > 6:
                         continue
+                    # Skip duplicates (case-insensitive)
+                    it_lower = it.lower()
+                    if it_lower in seen:
+                        continue
+                    # Enforce max items per year
+                    if len(safe_items) >= MAX_ITEMS_PER_YEAR:
+                        break
+                    seen.add(it_lower)
                     safe_items.append(it)
                 sections[key] = safe_items
             cleaned = {}
@@ -283,7 +341,29 @@ def _parse_plan_from_text(raw_text):
                     if re.findall(r"\d+", pk) == ek_nums and val:
                         found = val
                         break
-                cleaned[ek] = found[:MAX_ITEMS_PER_YEAR] if found else default_steps[i]
+                if found and len(found) > 0:
+                    # Ensure at least 8 items, otherwise use default
+                    if len(found) >= 5:
+                        cleaned[ek] = found[:MAX_ITEMS_PER_YEAR]
+                    else:
+                        # Too few items parsed, use fallback
+                        cleaned[ek] = default_steps[i]
+                else:
+                    cleaned[ek] = default_steps[i]
+            
+            # Cross-year deduplication: remove similar items that appear in multiple years
+            all_seen_lower = {}  # track which year each item was added
+            for ek in EXPECTED_KEYS:
+                items_list = cleaned[ek]
+                unique_items = []
+                for it in items_list:
+                    it_lower = it.lower()
+                    if it_lower not in all_seen_lower:
+                        unique_items.append(it)
+                        all_seen_lower[it_lower] = ek
+                    # else: item already in previous year, skip it
+                cleaned[ek] = unique_items
+            
             logger.debug("Parser: used headings heuristic with trimming.")
             return cleaned
     except Exception as e:
@@ -328,10 +408,19 @@ def _generate_survival_plan_hf_uncached(features, model_name=HF_MODEL, max_retri
         logger.warning("HF client not initialized; returning fallback.")
         return generate_fallback_plan(), {"hf_raw": None, "error": "no_client"}
 
-    baby_info = ", ".join([f"{k}: {v}" for k, v in features.items()])
+    # Build detailed feature description for better HF personalization
+    feature_details = [
+        f"Birth Weight: {features.get('birth_weight', 0.0)} kg",
+        f"Maternal Age: {features.get('maternal_age', 0.0)} years",
+        f"Immunization Status: {'Fully immunized' if features.get('immunized', 0) == 1 else 'Not fully immunized'}",
+        f"Nutrition Score: {features.get('nutrition', 0.0)}/100",
+        f"Socioeconomic Status: {features.get('socioeconomic', 0)} (0=low, 1=medium, 2=high)",
+        f"Prenatal Visits: {features.get('prenatal_visits', 0.0)} visits"
+    ]
+    baby_info = "\n".join(feature_details)
     messages = [
         {"role": "system", "content": USER_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Child features: {baby_info}. Provide JSON as described."}
+        {"role": "user", "content": f"Child features:\n{baby_info}\n\nProvide a personalized care and survival plan in JSON format as described."}
     ]
     last_raw = None
     for attempt in range(1, max_retries + 2):
