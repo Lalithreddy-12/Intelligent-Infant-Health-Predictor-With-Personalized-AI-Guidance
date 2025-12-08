@@ -3,15 +3,21 @@ import os
 import json
 import re
 import time
+import uuid
+import sqlite3
+import traceback
 from functools import lru_cache
+from datetime import datetime
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, session as flask_session
 from huggingface_hub import InferenceClient
 import joblib
 import pandas as pd
 import logging
 import numpy as np
 from sklearn.inspection import permutation_importance
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_cors import CORS
 
 # optional SHAP
 try:
@@ -26,9 +32,8 @@ HF_API_KEY = os.getenv("HF_API_KEY")
 HF_MODEL = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
 MAX_ITEMS_PER_YEAR = int(os.getenv("MAX_ITEMS_PER_YEAR", "12"))
 
-# Make Major/Moderate thresholds configurable via .env
-MAJOR_PCT = float(os.getenv("MAJOR_PCT", "35.0"))    # >= this pct -> Major
-MODERATE_PCT = float(os.getenv("MODERATE_PCT", "12.0"))  # >= this pct -> Moderate
+MAJOR_PCT = float(os.getenv("MAJOR_PCT", "35.0"))
+MODERATE_PCT = float(os.getenv("MODERATE_PCT", "12.0"))
 
 # --- Logging ---
 logger = logging.getLogger("child_mortality")
@@ -50,6 +55,18 @@ else:
 
 # --- Flask app + model loader ---
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-please-change")
+# important session cookie settings for dev:
+# - SameSite Lax helps cookies be sent on top-level navigations (safe default).
+# - For cross-origin credentialed fetch you will still need CORS(app, supports_credentials=True)
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+# In production set to True if you serve under HTTPS
+app.config["SESSION_COOKIE_SECURE"] = False
+
+# Allow cross-origin requests that use cookies (session-based auth)
+CORS(app, supports_credentials=True)
+
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "model.pkl")
 
 def load_model():
@@ -93,23 +110,68 @@ def validate_and_build_df(data: dict):
     except Exception as e:
         raise ValueError(f"Invalid data format: {e}")
 
-# === Fallback plan (unchanged) ===
+# === Fallback plan ===
 def generate_fallback_plan():
     return {
         "risk_level": "high",
         "years": {
-            "Year 0-1": ["Doctor visits", "Vaccinations", "Monitor growth and nutrition"],
-            "Year 1-2": ["Regular checkups", "Balanced diet", "Monitor development milestones"],
-            "Year 2-3": ["Speech and motor skill support", "Vaccinations update", "Nutritional supplements"],
-            "Year 3-4": ["School readiness assessment", "Preventive health checks", "Encourage physical activity"],
-            "Year 4-5": ["Annual pediatric screening", "Vaccinations", "Healthy lifestyle counseling"]
+            "Year 0-1": [
+                "Monitor vital signs daily (temperature, respiratory rate, heart rate)",
+                "Ensure exclusive breastfeeding or formula feeding with proper hygiene",
+                "Complete vaccination schedule on time (BCG, Polio, Hepatitis B, DPT)",
+                "Watch for danger signs: fever, difficulty breathing, poor feeding, lethargy",
+                "Maintain clean umbilical cord care and safe sleeping environment",
+                "Regular weight and length monitoring at health clinic",
+                "Prevent infections through handwashing and sanitization",
+                "Seek immediate care for signs of jaundice, seizures, or severe illness"
+            ],
+            "Year 1-2": [
+                "Continue immunization schedule (DPT booster, Polio, measles)",
+                "Introduce appropriate complementary foods at 6 months",
+                "Monitor developmental milestones (sitting, babbling, grasping)",
+                "Watch for signs of malnutrition or growth faltering",
+                "Ensure safe play environment free from hazards and choking risks",
+                "Regular health checkups every 3 months",
+                "Treat diarrhea and infections promptly with oral rehydration",
+                "Provide iron-rich foods and vitamin supplements as recommended"
+            ],
+            "Year 2-3": [
+                "Complete primary immunization series with all boosters",
+                "Monitor language development and encourage verbal communication",
+                "Provide balanced diet with proteins, vegetables, fruits, and grains",
+                "Watch for signs of developmental delay or behavioral concerns",
+                "Ensure safe play with age-appropriate toys and supervision",
+                "Regular dental check-ups and oral hygiene practices",
+                "Prevent accidents through childproofing and constant supervision",
+                "Screen for vision and hearing problems through clinical assessment"
+            ],
+            "Year 3-4": [
+                "Ensure all routine vaccinations are up-to-date before school entry",
+                "Assess cognitive and motor skill development regularly",
+                "Provide nutritious meals and limit sugary snacks and drinks",
+                "Encourage physical activity and outdoor play daily",
+                "Monitor emotional and social development with peers",
+                "Screen for common childhood illnesses (asthma, allergies, anemia)",
+                "Teach basic hygiene, handwashing, and disease prevention practices",
+                "Arrange vision and hearing screening before school enrollment"
+            ],
+            "Year 4-5": [
+                "Conduct comprehensive pre-school medical examination",
+                "Ensure all vaccinations including DPT booster and Polio are completed",
+                "Assess growth parameters and nutritional status",
+                "Evaluate motor skills, coordination, and physical fitness",
+                "Screen for behavioral and emotional problems or learning difficulties",
+                "Provide counseling on healthy lifestyle, nutrition, and hygiene",
+                "Update dental and vision care; address any identified issues",
+                "Discuss school readiness and prepare child for educational transition"
+            ]
         },
-        "warning": "Used fallback plan due to HF API failure or parsing error."
+        "warning": "Used fallback plan due to HF API failure or parsing error. Please consult with healthcare provider for personalized medical advice."
     }
 
 EXPECTED_KEYS = ["Year 0-1", "Year 1-2", "Year 2-3", "Year 3-4", "Year 4-5"]
 
-# === Parser helpers (kept robust from earlier) ===
+# === Parser helpers ===
 def _normalize_year_key(key_text):
     nums = re.findall(r"\d+", key_text)
     if len(nums) >= 2:
@@ -241,7 +303,7 @@ USER_SYSTEM_PROMPT = (
     "2. The JSON MUST contain exactly these keys:\n"
     "   \"Year 0-1\", \"Year 1-2\", \"Year 2-3\", \"Year 3-4\", \"Year 4-5\".\n"
     "3. Each key MUST map to an array (list) of SHORT, ACTIONABLE, CLINICALLY SAFE steps.\n"
-    "4. Provide **5 to 12 steps per year**. Always prefer medically relevant, risk-reducing, practical actions.\n"
+    "4. Provide **6 to 8 steps per year**. Always prefer medically relevant, risk-reducing, practical actions.\n"
     "5. PERSONALIZE the guidance based on the child’s features (birth weight, maternal age, immunization status, nutrition score, socioeconomic status, prenatal visits, etc.).\n"
     "6. GUIDANCE MUST BE RISK-FOCUSED:\n"
     "      - Emphasize infection prevention,\n"
@@ -258,14 +320,6 @@ USER_SYSTEM_PROMPT = (
     "9. DO NOT wrap JSON in code blocks. Output MUST start with \"{\" and end with \"}\" with no additional content.\n\n"
     "Your task:\n"
     "Given the child's risk factors, generate a **comprehensive, personalized survival & care plan** designed to REDUCE MORTALITY for HIGH-RISK infants/children through age 5.\n\n"
-    "Example JSON TEMPLATE (structure only; fill with your own medically-safe steps):\n"
-    "{\n"
-    "  \"Year 0-1\": [\"step1\", \"step2\", ...],\n"
-    "  \"Year 1-2\": [\"step1\", \"step2\", ...],\n"
-    "  \"Year 2-3\": [\"step1\", \"step2\", ...],\n"
-    "  \"Year 3-4\": [\"step1\", \"step2\", ...],\n"
-    "  \"Year 4-5\": [\"step1\", \"step2\", ...]\n"
-    "}\n\n"
     "If you cannot produce the required JSON, output an empty JSON object: {}\n"
 )
 
@@ -318,13 +372,9 @@ def _generate_survival_plan_hf_uncached(features, model_name=HF_MODEL, max_retri
             return generate_fallback_plan(), {"hf_raw": last_raw, "error": str(exc)}
     return generate_fallback_plan(), {"hf_raw": last_raw, "error": "max_retries_exceeded"}
 
-# --- Caching wrapper + public generator for HF survival plan ---
+# --- caching wrapper + public generator for HF survival plan ---
 @lru_cache(maxsize=256)
 def _cached_generate_plan_tuple(features_tuple):
-    """
-    Cache key is a tuple of the six numeric features in a deterministic order.
-    We store the JSON string of (plan, debug) to keep it JSON-serializable.
-    """
     features = {
         "birth_weight": features_tuple[0],
         "maternal_age": features_tuple[1],
@@ -334,14 +384,9 @@ def _cached_generate_plan_tuple(features_tuple):
         "prenatal_visits": features_tuple[5]
     }
     plan, debug = _generate_survival_plan_hf_uncached(features)
-    # return a JSON-serializable string
     return json.dumps((plan, debug))
 
 def generate_survival_plan_hf(features):
-    """
-    Public wrapper: deterministic tuple -> cached call -> returns (plan, debug)
-    Falls back to uncached HF call if cache decode fails.
-    """
     tup = (
         float(features.get("birth_weight", 0.0)),
         float(features.get("maternal_age", 0.0)),
@@ -355,7 +400,6 @@ def generate_survival_plan_hf(features):
         plan, debug = json.loads(cached)
         return plan, debug
     except Exception:
-        # If anything goes wrong with cache decoding, call the uncached function
         try:
             return _generate_survival_plan_hf_uncached({
                 "birth_weight": tup[0],
@@ -369,13 +413,15 @@ def generate_survival_plan_hf(features):
             logger.exception("generate_survival_plan_hf fallback failed: %s", exc)
             return generate_fallback_plan(), {"hf_raw": None, "error": "uncached_call_failed"}
 
-# === Explanation function (REPLACE / improved) ===
+# === Explanation function (keeps your robust multi-method approach) ===
 def explain_local_prediction(input_df):
     """
-    Improved explanation generator:
-    - Tries SHAP -> linear coef -> permutation -> heuristic
-    - Returns raw 'feature_contributions' and human-friendly 'feature_importance_human'
-    - Builds ui_html for quick display and keeps technical JSON for clinicians
+    Tries SHAP -> linear coef -> permutation -> heuristic.
+    Returns dict with:
+      - method
+      - feature_contributions (raw)
+      - feature_importance_human (list)
+      - ui_html (user-friendly HTML snippet)
     """
     if model is None:
         return {"error": "no_local_model"}
@@ -385,7 +431,7 @@ def explain_local_prediction(input_df):
     standardized_feats = []
     method = "unknown"
 
-    # 1) SHAP (best-effort)
+    # SHAP
     try:
         if _HAS_SHAP:
             core_model = model
@@ -396,7 +442,6 @@ def explain_local_prediction(input_df):
                 if hasattr(core_model, "feature_importances_") or core_model.__class__.__name__.lower().startswith(("lgbm","xgboost","catboost","randomforest")):
                     expl = shap.TreeExplainer(core_model)
                 else:
-                    # KernelExplainer may be slow; use input X as background for KernelExplainer
                     expl = shap.KernelExplainer(core_model.predict_proba, X)
             except Exception:
                 expl = None
@@ -412,7 +457,7 @@ def explain_local_prediction(input_df):
     except Exception as e:
         logger.debug("SHAP failed: %s", e)
 
-    # 2) Linear coefficients (for linear models)
+    # Linear coefficients
     if not standardized_feats:
         try:
             core = model
@@ -434,7 +479,7 @@ def explain_local_prediction(input_df):
         except Exception as e:
             logger.debug("Linear coef explanation failed: %s", e)
 
-    # 3) Permutation importance
+    # Permutation importance
     if not standardized_feats:
         try:
             try:
@@ -452,7 +497,7 @@ def explain_local_prediction(input_df):
         except Exception as e:
             logger.debug("Permutation importance failed: %s", e)
 
-    # 4) Heuristic fallback
+    # Heuristic fallback
     if not standardized_feats:
         try:
             core = model
@@ -482,10 +527,8 @@ def explain_local_prediction(input_df):
     if not standardized_feats:
         return {"error": "explanation_failed"}
 
-    # Normalize & sort by absolute effect
     standardized_feats = sorted(standardized_feats, key=lambda x: abs(x.get("contribution", 0.0)), reverse=True)
 
-    # Friendly labels & default recs
     FRIENDLY = {
         "birth_weight": ("Birth weight", "Provide feeding support and frequent weight checks; monitor growth."),
         "maternal_age": ("Maternal age", "Arrange maternal follow-up and counseling as needed."),
@@ -495,7 +538,6 @@ def explain_local_prediction(input_df):
         "prenatal_visits": ("Prenatal visits", "Arrange antenatal follow-up and skilled birth attendance.")
     }
 
-    # Compute relative importance (%) and magnitude label using configurable thresholds
     total_abs = sum(abs(float(x.get("contribution", 0.0))) for x in standardized_feats) or 1.0
     humanified = []
     top_n = min(6, len(standardized_feats))
@@ -539,7 +581,6 @@ def explain_local_prediction(input_df):
     top_labels = [h["label"] for h in humanified[:3]]
     summary = "Main drivers: " + ", ".join(top_labels) if top_labels else "No clear drivers identified."
 
-    # Build ui_html
     def _arrow_word(c):
         if c > 0.03:
             return ("↑", "#ef4444", "Increases")
@@ -600,23 +641,373 @@ def explain_local_prediction(input_df):
         "severity_score": severity_score
     }
 
-    # --- Log the final chosen method (single-line) ---
     logger.info("Explanation method used: %s", method)
-
     return explanation_payload
 
-# === Survival plan selector ===
+# --- Caching wrapper to avoid repeated identical HF calls for survival plan (public) ---
+@lru_cache(maxsize=256)
+def _cached_generate_plan_tuple_public(features_tuple_with_model):
+    features = {
+        "birth_weight": features_tuple_with_model[0],
+        "maternal_age": features_tuple_with_model[1],
+        "immunized": features_tuple_with_model[2],
+        "nutrition": features_tuple_with_model[3],
+        "socioeconomic": features_tuple_with_model[4],
+        "prenatal_visits": features_tuple_with_model[5]
+    }
+    plan, debug = _generate_survival_plan_hf_uncached(features)
+    return json.dumps((plan, debug))
+
+def generate_survival_plan_hf_public(features):
+    tup = (
+        float(features.get("birth_weight", 0.0)),
+        float(features.get("maternal_age", 0.0)),
+        int(features.get("immunized", 0)),
+        float(features.get("nutrition", 0.0)),
+        int(features.get("socioeconomic", 0)),
+        float(features.get("prenatal_visits", 0.0)),
+        HF_MODEL
+    )
+    try:
+        cached = _cached_generate_plan_tuple_public(tup)
+        plan, debug = json.loads(cached)
+        return plan, debug
+    except Exception:
+        return _generate_survival_plan_hf_uncached({
+            "birth_weight": tup[0],
+            "maternal_age": tup[1],
+            "immunized": tup[2],
+            "nutrition": tup[3],
+            "socioeconomic": tup[4],
+            "prenatal_visits": tup[5]
+        })
+
+# --- Survival plan selector ---
 def survival_plan(prediction, features=None, debug=False):
     if int(prediction) == 0:
-        return {"risk_level": "low", "message": "Low risk. Continue preventive care: vaccines, nutrition, safe environment."}, {"branch": "low"}
+        return {"risk_level": "low", "message": "Continue routine preventive care and regular health checkups. Complete immunization schedule on schedule. Ensure balanced nutrition and adequate feeding. Maintain safe sleeping environment (back sleeping, firm surface). Practice good hygiene and sanitation habits. Monitor for early signs of illness and seek prompt care. Provide safe drinking water and proper sanitation. Ensure adequate rest and physical activity for development. Continue preventive care: vaccines, nutrition, safe environment."}, {"branch": "low"}
     else:
         if features:
-            plan, debug_info = generate_survival_plan_hf(features)
+            plan, debug_info = generate_survival_plan_hf_public(features)
             return plan, {"branch": "high", **(debug_info or {})}
         else:
             return generate_fallback_plan(), {"branch": "high", "hf_raw": None, "error": "no_features"}
 
-# === Routes ===
+# ------------------- SQLite history DB helpers -------------------
+DB_PATH = os.path.join(os.path.dirname(__file__), "history.db")
+
+def _get_db_conn():
+    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+    conn.row_factory = sqlite3.Row
+    # Custom timestamp converter to handle ISO format strings
+    def convert_timestamp(val):
+        if isinstance(val, bytes):
+            val = val.decode('utf-8')
+        # Handle ISO format: 2025-12-06T21:07:19.604
+        if 'T' in val:
+            return val.replace('T', ' ')
+        return val
+    sqlite3.register_converter("timestamp", convert_timestamp)
+    return conn
+
+def init_history_db():
+    conn = _get_db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        session_id TEXT,
+        timestamp TIMESTAMP NOT NULL,
+        features_json TEXT,
+        probability REAL,
+        prediction INTEGER,
+        risk_category TEXT,
+        survival_plan_json TEXT,
+        explanation_json TEXT,
+        hf_raw TEXT,
+        model_used TEXT,
+        explanation_method TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+init_history_db()
+
+def _ensure_session_id():
+    sid = flask_session.get("sid")
+    if not sid:
+        sid = str(uuid.uuid4())
+        flask_session["sid"] = sid
+    return sid
+
+def _current_user_id():
+    return flask_session.get("user_id")
+
+def save_prediction_to_history(features, probability, prediction, risk_category, survival_plan,
+                               explanation=None, hf_raw=None, model_used=None, explanation_method=None):
+    try:
+        conn = _get_db_conn()
+        cur = conn.cursor()
+        user_id = _current_user_id()
+        session_id = _ensure_session_id()
+        ts = datetime.utcnow().isoformat()
+        cur.execute("""
+            INSERT INTO history
+            (user_id, session_id, timestamp, features_json, probability, prediction, risk_category,
+             survival_plan_json, explanation_json, hf_raw, model_used, explanation_method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            session_id,
+            ts,
+            json.dumps(features, default=str),
+            float(probability) if probability is not None else None,
+            int(prediction) if prediction is not None else None,
+            risk_category,
+            json.dumps(survival_plan, default=str),
+            json.dumps(explanation, default=str) if explanation is not None else None,
+            hf_raw,
+            model_used,
+            explanation_method
+        ))
+        conn.commit()
+        rowid = cur.lastrowid
+        conn.close()
+        logger.info("Saved prediction history id=%s user_id=%s session=%s", rowid, user_id, session_id)
+        return rowid
+    except Exception as e:
+        logger.exception("Failed to save history: %s", e)
+        return None
+
+# ----------------- Small new helper route: whoami -----------------
+@app.route("/api/auth/whoami", methods=["GET"])
+def api_whoami():
+    """
+    Returns current session-based user info or 401 if not logged in.
+    Frontend uses this to display login state without relying on tokens.
+    """
+    user_id = flask_session.get("user_id")
+    if not user_id:
+        return jsonify({"logged_in": False}), 200
+    conn = _get_db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, username, created_at FROM users WHERE id = ?", (user_id,))
+    r = cur.fetchone()
+    conn.close()
+    if not r:
+        # session contains stale user_id
+        flask_session.pop("user_id", None)
+        return jsonify({"logged_in": False}), 200
+    return jsonify({"logged_in": True, "user_id": r["id"], "username": r["username"], "created_at": r["created_at"]}), 200
+
+# ------------------- Auth & History endpoints -------------------
+@app.route("/api/auth/register", methods=["POST"])
+def api_register():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username")
+    password = data.get("password")
+    if not username or not password:
+        return jsonify({"error":"username & password required"}), 400
+    conn = _get_db_conn()
+    cur = conn.cursor()
+    try:
+        pw_hash = generate_password_hash(password)
+        cur.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                    (username, pw_hash, datetime.utcnow().isoformat()))
+        conn.commit()
+        user_id = cur.lastrowid
+        flask_session["user_id"] = user_id
+        conn.close()
+        return jsonify({"ok": True, "user_id": user_id})
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error":"username already exists"}), 400
+    except Exception as e:
+        conn.close()
+        logger.exception("register failed: %s", e)
+        return jsonify({"error":"internal"}), 500
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_login():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username"); password = data.get("password")
+    if not username or not password:
+        return jsonify({"error":"username & password required"}), 400
+    conn = _get_db_conn(); cur = conn.cursor()
+    cur.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    if not row:
+        conn.close(); return jsonify({"error":"invalid credentials"}), 401
+    user_id = row["id"]; pw_hash = row["password_hash"]
+    if not check_password_hash(pw_hash, password):
+        conn.close(); return jsonify({"error":"invalid credentials"}), 401
+    flask_session["user_id"] = user_id
+    conn.close()
+    return jsonify({"ok": True, "user_id": user_id})
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_logout():
+    flask_session.pop("user_id", None)
+    return jsonify({"ok": True})
+
+@app.route("/api/history", methods=["GET"])
+def api_history_list():
+    limit = int(request.args.get("limit", 20))
+    user_id = _current_user_id()
+    session_id = flask_session.get("sid")
+    conn = _get_db_conn(); cur = conn.cursor()
+    if user_id:
+        cur.execute("SELECT * FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
+    else:
+        cur.execute("SELECT * FROM history WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?", (session_id, limit))
+    rows = cur.fetchall(); conn.close()
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"],
+            "timestamp": r["timestamp"],
+            "features": json.loads(r["features_json"]) if r["features_json"] else None,
+            "probability": r["probability"],
+            "prediction": r["prediction"],
+            "risk_category": r["risk_category"],
+            "survival_plan": json.loads(r["survival_plan_json"]) if r["survival_plan_json"] else None,
+            "explanation": json.loads(r["explanation_json"]) if r["explanation_json"] and request.args.get("debug","").lower()=="true" else None,
+            "model_used": r["model_used"],
+            "explanation_method": r["explanation_method"]
+        })
+    return jsonify({"history": out})
+
+@app.route("/api/history/<int:hid>", methods=["GET"])
+def api_history_get(hid):
+    conn = _get_db_conn(); cur = conn.cursor()
+    cur.execute("SELECT * FROM history WHERE id = ?", (hid,))
+    r = cur.fetchone(); conn.close()
+    if not r:
+        return jsonify({"error":"not found"}), 404
+    rec = {
+        "id": r["id"],
+        "timestamp": r["timestamp"],
+        "features": json.loads(r["features_json"]) if r["features_json"] else None,
+        "probability": r["probability"],
+        "prediction": r["prediction"],
+        "risk_category": r["risk_category"],
+        "survival_plan": json.loads(r["survival_plan_json"]) if r["survival_plan_json"] else None,
+        "explanation": json.loads(r["explanation_json"]) if r["explanation_json"] and request.args.get("debug","").lower()=="true" else None,
+        "hf_raw": r["hf_raw"] if request.args.get("debug","").lower()=="true" else None,
+        "model_used": r["model_used"],
+        "explanation_method": r["explanation_method"]
+    }
+    return jsonify(rec)
+
+
+@app.route("/api/history/<int:hid>", methods=["DELETE"])
+def api_history_delete(hid):
+    """Delete a single history record belonging to the current logged-in user."""
+    user_id = _current_user_id()
+    if not user_id:
+        return jsonify({"error": "login required"}), 401
+    conn = _get_db_conn(); cur = conn.cursor()
+    cur.execute("DELETE FROM history WHERE id = ? AND user_id = ?", (hid, user_id))
+    if cur.rowcount == 0:
+        conn.close()
+        return jsonify({"error": "not found or not authorized"}), 404
+    conn.commit(); conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/history", methods=["DELETE"])
+def api_history_delete_all():
+    """Delete all history for the current logged-in user."""
+    user_id = _current_user_id()
+    if not user_id:
+        return jsonify({"error": "login required"}), 401
+    conn = _get_db_conn(); cur = conn.cursor()
+    cur.execute("DELETE FROM history WHERE user_id = ?", (user_id,))
+    conn.commit(); conn.close()
+    return jsonify({"ok": True, "deleted": True})
+
+# --- Merge local client history into logged-in user's history ---
+@app.route("/api/history/merge", methods=["POST"])
+def api_history_merge():
+    """
+    Accepts JSON: { "entries": [ { timestamp, input_json OR features, prediction_result OR prediction,
+                                   survival_plan, explanation, probability } , ... ] }
+    Requires user to be logged in (session-based). Returns inserted count.
+    """
+    user_id = _current_user_id()
+    if not user_id:
+        return jsonify({"error": "login required"}), 401
+
+    payload = request.get_json(silent=True) or {}
+    entries = payload.get("entries") or []
+    if not isinstance(entries, list):
+        return jsonify({"error": "entries must be a list"}), 400
+
+    inserted = 0
+    conn = _get_db_conn()
+    cur = conn.cursor()
+    session_id = _ensure_session_id()
+    for e in entries:
+        try:
+            ts = e.get("timestamp") or datetime.utcnow().isoformat()
+            features = e.get("input_json") or e.get("features") or e.get("inputs") or {}
+            try:
+                features_json = json.dumps(features, default=str)
+            except Exception:
+                features_json = json.dumps({}, default=str)
+            probability = e.get("probability")
+            try:
+                if probability is not None:
+                    p = float(probability)
+                    if p > 1.0 and p <= 100.0:
+                        probability = p / 100.0
+                    else:
+                        probability = p
+            except Exception:
+                probability = None
+            prediction = e.get("prediction") or (e.get("prediction_result") and (e.get("prediction_result").get("pred") if isinstance(e.get("prediction_result"), dict) else e.get("prediction_result")))
+            prediction_val = int(prediction) if prediction is not None else None
+            survival_plan = e.get("survival_plan") or e.get("plan") or {}
+            explanation = e.get("explanation") or e.get("debug") or None
+
+            cur.execute("""
+                INSERT INTO history
+                (user_id, session_id, timestamp, features_json, probability, prediction, risk_category, survival_plan_json, explanation_json, hf_raw, model_used, explanation_method)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                session_id,
+                ts,
+                features_json,
+                float(probability) if probability is not None else None,
+                prediction_val,
+                None,
+                json.dumps(survival_plan, default=str),
+                json.dumps(explanation, default=str) if explanation is not None else None,
+                None,
+                HF_MODEL,
+                None
+            ))
+            inserted += 1
+        except Exception as exc:
+            logger.exception("merge entry failed: %s", exc)
+            continue
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "merged", "inserted": inserted})
+
+# --- Routes: index, health, reload_model ---
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
@@ -631,6 +1022,7 @@ def reload_model():
     model = load_model()
     return jsonify({"reloaded": model is not None})
 
+# --- Predict endpoint (integrates explanation + history save) ---
 @app.route("/api/predict", methods=["POST"])
 def predict_api():
     global model
@@ -662,6 +1054,7 @@ def predict_api():
         return jsonify({"error": "Model inference failed", "details": str(e)}), 500
 
     features = df.iloc[0].to_dict()
+    # survival plan
     plan_obj, debug_info = survival_plan(pred, features, debug=debug_flag)
 
     response = {
@@ -672,6 +1065,7 @@ def predict_api():
         "debug": {"branch": debug_info.get("branch", "high" if pred == 1 else "low")}
     }
 
+    # attach survival plan debug / HF raw if present
     if debug_flag:
         hf_raw = debug_info.get("hf_raw")
         if hf_raw:
@@ -679,14 +1073,38 @@ def predict_api():
         if "error" in debug_info:
             response["debug"]["error"] = debug_info["error"]
 
-        # attach explanation (attempt)
-        try:
-            explanation = explain_local_prediction(df)
-            response["debug"]["explanation"] = explanation
-            response["debug"]["explanation_summary"] = explanation.get("summary") if isinstance(explanation, dict) else None
-        except Exception as ex:
-            logger.exception("Explanation generation failed: %s", ex)
+    # attach explanation (attempt)
+    explanation_payload = None
+    try:
+        explanation_payload = explain_local_prediction(df)
+        if explanation_payload:
+            # include explanation in debug only
+            if debug_flag:
+                response["debug"]["explanation"] = explanation_payload
+                response["debug"]["explanation_summary"] = explanation_payload.get("summary")
+    except Exception as ex:
+        logger.exception("Explanation generation failed: %s", ex)
+        if debug_flag:
             response["debug"]["explanation_error"] = str(ex)
+
+    # prepare risk category
+    risk_cat = "High" if pred == 1 or (prob is not None and prob >= 0.6) else ("Medium" if prob is not None and prob >= 0.35 else "Low")
+
+    # Save history (best-effort)
+    try:
+        save_prediction_to_history(
+            features=features,
+            probability=prob,
+            prediction=pred,
+            risk_category=risk_cat,
+            survival_plan=plan_obj,
+            explanation=explanation_payload if debug_flag else (explanation_payload if False else None),
+            hf_raw=debug_info.get("hf_raw") if isinstance(debug_info, dict) else None,
+            model_used=HF_MODEL,
+            explanation_method=(explanation_payload.get("method") if isinstance(explanation_payload, dict) else None)
+        )
+    except Exception as e:
+        logger.exception("history save failed: %s", e)
 
     return jsonify(response)
 

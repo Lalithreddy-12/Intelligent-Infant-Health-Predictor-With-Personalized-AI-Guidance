@@ -124,3 +124,11 @@ optuna_study.db
 
 Files to ignore
 test.py
+history.db
+history.db-journal
+fix_history.js
+LOADHISTORY_FIX.js
+
+*.sqlite
+*.sqlite-journal
+*.log

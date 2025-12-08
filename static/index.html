@@ -2,20 +2,24 @@
 <html lang="en" class="scroll-smooth">
 <head>
   <meta charset="utf-8" />
-  <title>Child Mortality Prediction</title>
+  <title>Infant Health Predictor with AI Guidance</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <!-- Tailwind Play CDN (no build step) -->
+
+  <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Font -->
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Tailwind Config -->
   <script>
-    // Tailwind config for dark mode class strategy
     tailwind.config = {
       darkMode: 'class',
       theme: {
         extend: {
           colors: {
-            primary: '#06b6d4', // modern cyan
-            secondary: '#8b5cf6', // purple accent
+            primary: '#06b6d4',
+            secondary: '#8b5cf6',
             success: '#10b981',
             warning: '#f59e0b',
             danger: '#ef4444'
@@ -28,388 +32,285 @@
     }
   </script>
 
-  <style>
-    /* Modern design system */
-    body { 
-      font-family: 'Poppins', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
-      background: linear-gradient(to bottom right, #f9fafb, #ffffff, #f0f9ff);
-    }
-    
-    .dark body {
-      background: linear-gradient(to bottom right, #030712, #111827, #082f49);
-    }
-    
-    .circular-chart { display: block; margin: 0 auto; max-width: 120px; transform: rotate(-90deg); }
-    .circle-bg { fill: none; stroke: #e5e7eb; stroke-width: 3.8; }
-    .circle { fill: none; stroke-width: 3.8; stroke-linecap: round; transition: stroke-dasharray 800ms cubic-bezier(0.25, 0.46, 0.45, 0.94); }
-    .meter-label { transform: rotate(90deg); }
-    
-    /* Smooth animations */
-    .animate-fade-up { 
-      opacity: 0; 
-      transform: translateY(12px); 
-      transition: opacity 400ms cubic-bezier(0.16, 1, 0.3, 1), transform 400ms cubic-bezier(0.16, 1, 0.3, 1); 
-    }
-    .animate-fade-up.in { opacity: 1; transform: translateY(0); }
-    
-    .plan-card {
-      transition: all 300ms cubic-bezier(0.4, 0, 0.2, 1);
-      position: relative;
-      overflow: hidden;
-    }
-    
-    .plan-card::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: -100%;
-      width: 100%;
-      height: 100%;
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
-      transition: left 500ms ease;
-    }
-    
-    .plan-card:hover {
-      transform: translateY(-6px);
-      box-shadow: 0 20px 40px rgba(6, 182, 212, 0.15);
-    }
-    
-    .plan-card:hover::before {
-      left: 100%;
-    }
-    
-    /* Input focus effects */
-    input:focus, select:focus {
-      border-color: #06b6d4;
-      box-shadow: 0 0 20px rgba(6, 182, 212, 0.15), inset 0 0 0 2px rgba(6, 182, 212, 0.1);
-      outline: none;
-    }
-    
-    /* Button animations */
-    button {
-      transition: all 250ms cubic-bezier(0.4, 0, 0.2, 1);
-    }
-    
-    button:active {
-      transform: scale(0.98);
-    }
-    
-    .btn-primary {
-      background: linear-gradient(to right, #06b6d4, #06d6d6);
-      color: white;
-      font-weight: 600;
-      box-shadow: 0 10px 25px rgba(6, 182, 212, 0.25);
-      transition: all 300ms cubic-bezier(0.4, 0, 0.2, 1);
-    }
-    
-    .btn-primary:hover {
-      box-shadow: 0 15px 35px rgba(6, 182, 212, 0.35);
-      transform: translateY(-2px);
-    }
-    
-    /* Card elevated design */
-    .card-elevated {
-      background: rgba(255, 255, 255, 0.7);
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(255, 255, 255, 0.5);
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
-    }
-    
-    .dark .card-elevated {
-      background: rgba(31, 41, 55, 0.5);
-      border-color: rgba(107, 114, 128, 0.3);
-    }
-    
-    /* Gradient text */
-    .gradient-text {
-      background: linear-gradient(135deg, #06b6d4, #8b5cf6);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-    
-    /* Badge styles */
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      padding: 0.25rem 0.75rem;
-      border-radius: 9999px;
-      font-size: 0.75rem;
-      font-weight: 600;
-    }
-    
-    .badge-low {
-      background-color: rgba(16, 185, 129, 0.1);
-      color: #059669;
-    }
-    
-    .dark .badge-low {
-      background-color: rgba(16, 185, 129, 0.2);
-      color: #6ee7b7;
-    }
-    
-    .badge-high {
-      background-color: rgba(239, 68, 68, 0.1);
-      color: #dc2626;
-    }
-    
-    .dark .badge-high {
-      background-color: rgba(239, 68, 68, 0.2);
-      color: #fca5a5;
-    }
-    
-    .badge-medium {
-      background-color: rgba(245, 158, 11, 0.1);
-      color: #d97706;
-    }
-    
-    .dark .badge-medium {
-      background-color: rgba(245, 158, 11, 0.2);
-      color: #fcd34d;
-    }
-  </style>
+  <!-- Custom Stylesheet -->
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
-<body class="bg-gradient-to-br from-gray-50 via-white to-blue-50 dark:from-gray-950 dark:via-gray-900 dark:to-blue-950 text-gray-900 dark:text-gray-50 min-h-screen transition-colors duration-300">
+
+<body class="bg-gradient-to-br from-gray-50 via-white to-blue-50 dark:from-gray-950 dark:via-gray-900 dark:to-blue-950">
 
   <div class="min-h-screen">
-    <!-- Header with glassmorphism -->
+    
+    <!-- HEADER -->
     <header class="sticky top-0 z-50 backdrop-blur-md border-b border-white/20 dark:border-gray-700/30 bg-white/50 dark:bg-gray-900/50">
-      <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <div class="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
+
         <div class="flex items-center space-x-3">
           <div class="p-2 bg-gradient-to-br from-primary to-secondary rounded-lg">
             <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
           </div>
           <div>
-            <h1 class="text-xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">Child Mortality Prediction</h1>
-            <p class="text-xs text-gray-600 dark:text-gray-400">AI-Powered Clinical Decision Support</p>
+            <h1 class="text-lg md:text-xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
+              Infant Health Predictor
+            </h1>
+            <p class="text-xs text-gray-600 dark:text-gray-400">
+              AI-Powered Health Risk Assessment & Care Plan
+            </p>
           </div>
         </div>
 
-        <button id="themeToggle" aria-label="Toggle theme" class="p-2.5 rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
-          <span id="themeIcon" class="text-lg">🌙</span>
-        </button>
+        <div class="flex items-center gap-3">
+
+          <!-- Theme toggle -->
+          <button id="themeToggle" aria-label="Toggle theme" class="p-2.5 rounded-lg bg-gray-100 dark:bg-gray-800">
+            <span id="themeIcon" class="text-lg">🌙</span>
+          </button>
+
+          <!-- Header: Simple Login Button -->
+          <button id="loginOnlyBtn"
+                  class="px-4 py-2 rounded-lg font-semibold bg-primary text-white shadow">
+            Login
+          </button>
+
+        </div>
       </div>
     </header>
 
+    <!-- MAIN SECTION -->
     <main class="max-w-7xl mx-auto px-4 py-8 pb-16">
+
+      <!-- GRID LAYOUT -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <!-- LEFT: Form Section -->
+
+        <!-- LEFT: Prediction Inputs -->
         <section class="lg:col-span-2">
-          <!-- Form Card -->
-          <div class="card-elevated rounded-3xl p-8 shadow-xl border border-gray-100 dark:border-gray-700">
-            <h2 class="text-2xl font-bold mb-6">Enter Patient Information</h2>
-            <form id="predictForm" class="space-y-6">
+
+          <div class="card-elevated rounded-3xl p-8 shadow-xl">
+            <h2 class="text-2xl font-bold mb-6">Enter Infant and Maternal Details</h2>
+
+            <form id="predictForm" class="space-y-6" onsubmit="return false;">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                <div class="form-group">
-                  <label class="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-200">
-                    Birth Weight <span class="text-danger">*</span>
-                  </label>
+
+                <!-- Birth Weight -->
+                <div>
+                  <label class="block text-sm font-semibold mb-2">Birth Weight *</label>
                   <div class="relative">
-                    <input id="birth_weight" type="number" step="0.01" value="2.8" placeholder="kg" class="w-full px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 transition-all"/>
+                    <input id="birth_weight" type="number" step="0.01" value="2.8"
+                      class="w-full px-4 py-3 rounded-xl border-2">
                     <span class="absolute right-4 top-3.5 text-gray-400 text-sm">kg</span>
                   </div>
                 </div>
 
-                <div class="form-group">
-                  <label class="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-200">
-                    Maternal Age <span class="text-danger">*</span>
-                  </label>
+                <!-- Maternal Age -->
+                <div>
+                  <label class="block text-sm font-semibold mb-2">Maternal Age *</label>
                   <div class="relative">
-                    <input id="maternal_age" type="number" step="0.1" value="26" placeholder="years" class="w-full px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 transition-all"/>
+                    <input id="maternal_age" type="number" step="0.1" value="26"
+                      class="w-full px-4 py-3 rounded-xl border-2">
                     <span class="absolute right-4 top-3.5 text-gray-400 text-sm">years</span>
                   </div>
                 </div>
 
-                <div class="form-group">
-                  <label class="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-200">
-                    Immunization Status <span class="text-danger">*</span>
-                  </label>
-                  <select id="immunized" class="w-full px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white transition-all cursor-pointer">
+                <!-- Immunized -->
+                <div>
+                  <label class="block text-sm font-semibold mb-2">Immunization Status *</label>
+                  <select id="immunized" class="w-full px-4 py-3 rounded-xl border-2">
                     <option value="1">✓ Immunized</option>
                     <option value="0">✗ Not Immunized</option>
                   </select>
                 </div>
 
-                <div class="form-group">
-                  <label class="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-200">
-                    Nutrition Score <span class="text-danger">*</span>
-                  </label>
+                <!-- Nutrition -->
+                <div>
+                  <label class="block text-sm font-semibold mb-2">Nutrition Score *</label>
                   <div class="relative">
-                    <input id="nutrition" type="number" step="0.1" value="60" placeholder="0-100" class="w-full px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 transition-all"/>
+                    <input id="nutrition" type="number" step="0.1" value="60"
+                      class="w-full px-4 py-3 rounded-xl border-2">
                     <span class="absolute right-4 top-3.5 text-gray-400 text-sm">/100</span>
                   </div>
                 </div>
 
-                <div class="form-group">
-                  <label class="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-200">
-                    Socioeconomic Status <span class="text-danger">*</span>
-                  </label>
-                  <select id="socioeconomic" class="w-full px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white transition-all cursor-pointer">
+                <!-- Socioeconomic -->
+                <div>
+                  <label class="block text-sm font-semibold mb-2">Socioeconomic Status *</label>
+                  <select id="socioeconomic" class="w-full px-4 py-3 rounded-xl border-2">
                     <option value="0">Low Income</option>
                     <option value="1" selected>Middle Income</option>
                     <option value="2">High Income</option>
                   </select>
                 </div>
 
-                <div class="form-group">
-                  <label class="block text-sm font-semibold mb-2 text-gray-700 dark:text-gray-200">
-                    Prenatal Visits <span class="text-danger">*</span>
-                  </label>
+                <!-- Prenatal Visits -->
+                <div>
+                  <label class="block text-sm font-semibold mb-2">Prenatal Visits *</label>
                   <div class="relative">
-                    <input id="prenatal_visits" type="number" step="1" value="4" placeholder="visits" class="w-full px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 transition-all"/>
+                    <input id="prenatal_visits" type="number" value="4"
+                      class="w-full px-4 py-3 rounded-xl border-2">
                     <span class="absolute right-4 top-3.5 text-gray-400 text-sm">visits</span>
                   </div>
                 </div>
+
               </div>
 
-              <div class="pt-4 flex items-center justify-between gap-3">
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  ⚠️ For demo purposes only. Validate with real clinical data before production use.
-                </p>
-                <div class="flex items-center space-x-3">
-                  <button id="predict" type="button" class="btn-primary inline-flex items-center gap-2 px-6 py-3 rounded-xl text-white font-semibold">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              <div class="pt-4 flex items-center justify-between">
+                <p class="text-xs text-gray-500">⚠️ Not for real medical diagnosis.</p>
+                <div class="flex gap-3">
+                  <button id="predict" type="button"
+                    class="btn-primary px-6 py-3 rounded-xl flex items-center gap-2">
                     Predict
                   </button>
-                  <button id="clear" type="button" class="px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300 font-semibold hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                  <button id="clear" type="button"
+                    class="px-4 py-3 rounded-xl border-2 font-semibold">
                     Clear
                   </button>
                 </div>
               </div>
+
             </form>
           </div>
 
-          <!-- Results Card -->
-          <div id="resultCard" class="mt-8 hidden card-elevated rounded-3xl p-8 shadow-xl border border-gray-100 dark:border-gray-700">
-            <!-- Risk Summary -->
+          <!-- Results -->
+          <div id="resultCard" class="mt-8 hidden card-elevated rounded-3xl p-8 shadow-xl">
+
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-              <!-- Circular Meter -->
               <div class="flex flex-col items-center justify-center p-6 bg-white dark:bg-gray-800 rounded-2xl">
-                <svg class="circular-chart" viewBox="0 0 36 36" width="140" height="140" aria-hidden="true">
+                <svg class="circular-chart" viewBox="0 0 36 36" width="140" height="140">
                   <path class="circle-bg" d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831a 15.9155 15.9155 0 0 1 0 -31.831"/>
-                  <path id="meterCircle" class="circle" stroke="#10b981" d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831a 15.9155 15.9155 0 0 1 0 -31.831" stroke-dasharray="0, 100"></path>
+                  <path id="meterCircle" class="circle" stroke="#10b981"
+                    d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831a 15.9155 15.9155 0 0 1 0 -31.831"
+                    stroke-dasharray="0, 100"></path>
                 </svg>
-                <p class="mt-4 text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider">Risk Score</p>
               </div>
 
-              <!-- Risk & Probability -->
-              <div class="md:col-span-2 flex flex-col justify-between">
-                <div>
-                  <div class="flex items-center gap-2 mb-2">
-                    <span id="riskLabel" class="text-3xl font-bold">—</span>
-                    <span id="riskBadge" class="badge badge-low hidden">Low Risk</span>
-                  </div>
-                  <p id="probLabel" class="text-sm text-gray-600 dark:text-gray-400 mb-4">Probability: —</p>
-                </div>
+              <div class="md:col-span-2">
+                <span id="riskLabel" class="text-3xl font-bold">—</span>
+                <p id="probLabel" class="text-sm mt-2">Probability: —</p>
 
-                <!-- Progress Bar -->
-                <div>
-                  <div class="flex items-center justify-between mb-2">
-                    <span class="text-xs font-semibold text-gray-600 dark:text-gray-400">Mortality Risk</span>
-                    <span id="probPercent" class="text-xs font-semibold text-gray-600 dark:text-gray-400">0%</span>
+                <div class="mt-4">
+                  <span class="text-xs">Mortality Risk</span>
+                  <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3 mt-1 overflow-hidden">
+                    <div id="probBar" class="h-3 rounded-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 transition-all duration-300"
+                         style="width:0%"></div>
                   </div>
-                  <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 overflow-hidden">
-                    <div id="probBar" class="h-2.5 rounded-full bg-gradient-to-r from-success to-danger" style="width:0%; transition: width 800ms cubic-bezier(0.25, 0.46, 0.45, 0.94);"></div>
+                  <div class="flex justify-between text-xs text-gray-600 dark:text-gray-400 mt-1">
+                    <span>Low</span><span>Medium</span><span>High</span>
                   </div>
                 </div>
               </div>
             </div>
 
-            <hr class="my-6 border-gray-200 dark:border-gray-600" />
+            <details class="mt-4 border border-gray-200 dark:border-gray-700 rounded-lg p-3">
+              <summary class="cursor-pointer font-semibold text-primary text-sm">📊 Explain Prediction</summary>
+              <div id="explainText" class="mt-3 text-sm text-gray-700 dark:text-gray-300"></div>
+            </details>
 
-            <!-- Explain Button -->
-            <div class="mb-6">
-              <button id="explainBtn" class="text-sm px-4 py-2 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 font-semibold transition-colors">
-                <svg xmlns="http://www.w3.org/2000/svg" class="inline w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                Explain Prediction
-              </button>
-              <div id="explainText" class="mt-3 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg text-sm text-gray-700 dark:text-gray-300 hidden"></div>
-            </div>
+            <h3 class="text-lg font-bold mt-6 mb-4">Healthcare Recommendations</h3>
+            <div id="planContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
 
-            <!-- Plan Container -->
-            <div>
-              <h3 class="text-lg font-bold mb-4">Healthcare Recommendations</h3>
-              <div id="planContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
-            </div>
           </div>
+
         </section>
 
-        <!-- RIGHT: Info Panel -->
+        <!-- RIGHT: HISTORY PANEL -->
         <aside class="lg:col-span-1">
-          <!-- Quick Info -->
-          <div class="card-elevated rounded-3xl p-6 shadow-lg border border-gray-100 dark:border-gray-700 sticky top-24">
-            <div class="flex items-center space-x-2 mb-4">
-              <div class="p-2 bg-secondary/10 rounded-lg">
-                <svg class="w-5 h-5 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-              </div>
-              <h3 class="font-bold text-lg">Quick Guide</h3>
-            </div>
+          <div class="card-elevated rounded-3xl p-6 shadow-lg sticky top-24">
 
-            <div class="space-y-3">
-              <div class="flex gap-3">
-                <span class="text-xl">📊</span>
-                <div>
-                  <p class="text-sm font-semibold">Analyze Risk Factors</p>
-                  <p class="text-xs text-gray-600 dark:text-gray-400">Enter patient data to get AI-powered risk assessment</p>
+            <h3 class="font-bold text-lg mb-3">Prediction History</h3>
+            <div id="historyContainer"
+                 class="max-h-56 overflow-auto space-y-2 mb-3"></div>
+
+            <div class="flex gap-2">
+              <button onclick="loadHistory(10, false)"
+                      class="px-3 py-2 rounded bg-primary text-white text-sm">
+                Load More
+              </button>
+              <button id="clearHistoryBtn" style="display:none" class="px-3 py-2 rounded bg-red-100 text-red-700 text-sm">
+                Clear History
+              </button>
+            </div>
+            <div id="historyPlaceholder" class="text-xs text-gray-500 dark:text-gray-400 mt-2">If you predict, the history will be saved here.</div>
+
+            <!-- Quick Info -->
+            <div class="card-elevated rounded-3xl p-6 shadow-lg border border-gray-100 dark:border-gray-700 mt-4">
+              <div class="flex items-center space-x-2 mb-4">
+                <div class="p-2 bg-secondary/10 rounded-lg">
+                  <svg class="w-5 h-5 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                </div>
+                <h3 class="font-bold text-lg">Quick Info</h3>
+              </div>
+
+              <div class="space-y-3">
+                <div class="flex gap-3">
+                  <span class="text-xl">📊</span>
+                  <div>
+                    <p class="text-sm font-semibold">Analyze Risk Factors</p>
+                    <p class="text-xs text-gray-600 dark:text-gray-400">Enter Infant and Mother data to get AI-ML powered risk assessment</p>
+                  </div>
+                </div>
+
+                <div class="flex gap-3">
+                  <span class="text-xl">🔍</span>
+                  <div>
+                    <p class="text-sm font-semibold">View Insights</p>
+                    <p class="text-xs text-gray-600 dark:text-gray-400">Click "Explain Prediction" to understand key contributing factors</p>
+                  </div>
+                </div>
+
+                <div class="flex gap-3">
+                  <span class="text-xl">💡</span>
+                  <div>
+                    <p class="text-sm font-semibold">Get Recommendations</p>
+                    <p class="text-xs text-gray-600 dark:text-gray-400">Receive AI-powered healthcare recommendations based on your inputs</p>
+                  </div>
                 </div>
               </div>
 
-              <div class="flex gap-3">
-                <span class="text-xl">🔍</span>
-                <div>
-                  <p class="text-sm font-semibold">View Insights</p>
-                  <p class="text-xs text-gray-600 dark:text-gray-400">Click "Explain" to understand key contributing factors</p>
+              <hr class="my-4 border-gray-200 dark:border-gray-600" />
+
+              <!-- Risk Legend -->
+              <h4 class="text-sm font-bold mb-3">Risk Levels</h4>
+              <div class="space-y-2 text-xs">
+                <div class="flex items-center gap-2">
+                  <div class="w-3 h-3 rounded-full bg-gradient-to-r from-success to-emerald-400"></div>
+                  <span class="text-gray-700 dark:text-gray-300">Low Risk (0-35%)</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="w-3 h-3 rounded-full bg-gradient-to-r from-warning to-amber-400"></div>
+                  <span class="text-gray-700 dark:text-gray-300">Medium Risk (35-70%)</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="w-3 h-3 rounded-full bg-gradient-to-r from-danger to-red-500"></div>
+                  <span class="text-gray-700 dark:text-gray-300">High Risk (70%+)</span>
                 </div>
               </div>
 
-              <div class="flex gap-3">
-                <span class="text-xl">💡</span>
-                <div>
-                  <p class="text-sm font-semibold">Get Recommendations</p>
-                  <p class="text-xs text-gray-600 dark:text-gray-400">Receive personalized healthcare recommendations</p>
-                </div>
+              <hr class="my-4 border-gray-200 dark:border-gray-600" />
+
+              <!-- Disclaimer -->
+              <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3">
+                <p class="text-xs font-semibold text-yellow-800 dark:text-yellow-200 mb-1">⚠️ Disclaimer</p>
+                <p class="text-xs text-yellow-700 dark:text-yellow-300">This tool is for educational and research purposes only. Always consult with qualified medical professionals for clinical decisions.</p>
               </div>
             </div>
 
-            <hr class="my-4 border-gray-200 dark:border-gray-600" />
-
-            <!-- Risk Legend -->
-            <h4 class="text-sm font-bold mb-3">Risk Levels</h4>
-            <div class="space-y-2 text-xs">
-              <div class="flex items-center gap-2">
-                <div class="w-3 h-3 rounded-full bg-gradient-to-r from-success to-emerald-400"></div>
-                <span class="text-gray-700 dark:text-gray-300">Low Risk (0-35%)</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <div class="w-3 h-3 rounded-full bg-gradient-to-r from-warning to-amber-400"></div>
-                <span class="text-gray-700 dark:text-gray-300">Medium Risk (35-70%)</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <div class="w-3 h-3 rounded-full bg-gradient-to-r from-danger to-red-500"></div>
-                <span class="text-gray-700 dark:text-gray-300">High Risk (70%+)</span>
-              </div>
-            </div>
-
-            <hr class="my-4 border-gray-200 dark:border-gray-600" />
-
-            <!-- Disclaimer -->
-            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3">
-              <p class="text-xs font-semibold text-yellow-800 dark:text-yellow-200 mb-1">⚠️ Disclaimer</p>
-              <p class="text-xs text-yellow-700 dark:text-yellow-300">This tool is for educational and research purposes only. Always consult with qualified medical professionals for clinical decisions.</p>
-            </div>
-          </aside>
-        </main>
-
-        <!-- Footer -->
-        <footer class="border-t border-gray-200 dark:border-gray-700 bg-white/50 dark:bg-gray-900/50 backdrop-blur-md">
-          <div class="max-w-7xl mx-auto px-6 py-6 text-center text-xs text-gray-600 dark:text-gray-400">
-            <p>Developed by <a href="https://www.linkedin.com/in/lalith-kammannagaru/" target="_blank" class="font-semibold text-primary hover:text-secondary transition-colors">Lalith Kammannagaru</a> • AI-Powered Clinical Decision Support</p>
           </div>
-        </footer>
+        </aside>
+
       </div>
-    </div>
+
+    </main>
+
+    <footer class="border-t bg-white/50 dark:bg-gray-900/50">
+      <div class="max-w-7xl mx-auto px-6 py-6 text-center text-xs">
+        Developed by <a href="https://www.linkedin.com/in/lalith-kammannagaru/"
+                        class="font-semibold text-primary">
+          Lalith Kammannagaru
+        </a>
+      </div>
+    </footer>
+
   </div>
 
-  <script src="/static/app.js"></script>
+  <!-- App Script -->
+  <script src="/static/app.js?v=2"></script>
 </body>
 </html>
