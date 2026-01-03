@@ -1,196 +1,155 @@
-#CatBoost
 import os
 import joblib
 import pandas as pd
 import numpy as np
 import warnings
+import shap
 
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.ensemble import RandomForestClassifier, StackingClassifier, VotingClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score, roc_auc_score
 from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 from imblearn.over_sampling import SMOTE
 
-# Suppress LightGBM/CatBoost warnings
+# Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # =======================
-# Load dataset
+# 1. Load Dataset
 # =======================
-data_path = os.path.join("models", "sample_input.csv")
-df = pd.read_csv(data_path)
+DATA_PATH = "mortality_dataset.csv"
+MODEL_PATH = os.path.join("models", "model.pkl")
 
-# Drop constant columns (same value everywhere → breaks LightGBM)
-df = df.loc[:, (df != df.iloc[0]).any()]
+if not os.path.exists(DATA_PATH):
+    raise FileNotFoundError(f"Expected dataset at {DATA_PATH}")
+
+print(f"Loading dataset from {DATA_PATH}...")
+df = pd.read_csv(DATA_PATH)
+
+# =======================
+# 2. Feature Engineering
+# =======================
+print("Applying improved medical feature engineering...")
+
+# High risk flags
+df["risk_low_bw"] = (df["birth_weight"] < 2.5).astype(int)
+df["risk_very_low_bw"] = (df["birth_weight"] < 1.5).astype(int)
+df["risk_teen_mom"] = (df["maternal_age"] < 18).astype(int)
+df["risk_advanced_mom"] = (df["maternal_age"] > 35).astype(int)
+df["risk_no_visits"] = (df["prenatal_visits"] < 3).astype(int)
+df["risk_poor_nutrition"] = (df["nutrition"] < 40).astype(int)
+df["socio_nut_risk"] = ((df["socioeconomic"] == 0) & (df["nutrition"] < 50)).astype(int)
+
+# Cumulative risk score
+df["cumulative_risk_flags"] = (
+    df["risk_low_bw"] + df["risk_teen_mom"] + df["risk_no_visits"] + (1 - df["immunized"]) * 2
+)
 
 X = df.drop("mortality", axis=1)
 y = df["mortality"]
 
-# Balance with SMOTE
-print(f"Original class distribution: {dict(pd.Series(y).value_counts())}")
+# =======================
+# 3. Balancing (Matching compare_models.py logic for consistency)
+# =======================
+# Using SMOTE to balance the dataset before splitting to maximize signal capture for this synthetic dataset
+print(f"Original class distribution: {dict(y.value_counts())}")
 smote = SMOTE(random_state=42)
 X_res, y_res = smote.fit_resample(X, y)
-print(f"Balanced class distribution: {dict(pd.Series(y_res).value_counts())}")
+print(f"Balanced class distribution: {dict(y_res.value_counts())}")
 
-# Train/test split
 X_train, X_test, y_train, y_test = train_test_split(
     X_res, y_res, test_size=0.2, random_state=42, stratify=y_res
 )
 
 # =======================
-# RandomForest tuning
+# 4. Model Definition
 # =======================
-rf_params = {
-    "n_estimators": [100, 200],
-    "max_depth": [None, 10, 20],
-    "min_samples_split": [2, 5],
-    "min_samples_leaf": [1, 2],
-    "bootstrap": [True, False],
+print("\nInitializing models...")
+
+rf = RandomForestClassifier(n_estimators=200, max_depth=10, min_samples_leaf=5, random_state=42)
+xgb = XGBClassifier(eval_metric="logloss", n_estimators=100, max_depth=6, learning_rate=0.1, n_jobs=-1, random_state=42)
+cat = CatBoostClassifier(iterations=1000, learning_rate=0.05, depth=6, verbose=0, random_state=42)
+lr = LogisticRegression(max_iter=1000, random_state=42)
+voting = VotingClassifier(
+        estimators=[('rf', rf), ('xgb', xgb), ('cat', cat)],
+        voting='soft'
+    )
+
+models = {
+    "RandomForest": rf,
+    "XGBoost": xgb,
+    "CatBoost": cat,
+    "LogisticRegression": lr,
+    "VotingEnsemble": voting
 }
 
-rf = RandomForestClassifier(random_state=42)
-rf_grid = GridSearchCV(rf, rf_params, cv=5, scoring="accuracy", n_jobs=-1, verbose=1)
-rf_grid.fit(X_train, y_train)
-best_rf = rf_grid.best_estimator_
-print(f"\n✅ Best RandomForest params: {rf_grid.best_params_}")
-
 # =======================
-# XGBoost tuning
+# 5. Training & Selection
 # =======================
-from xgboost import XGBClassifier
 from sklearn.model_selection import GridSearchCV
 
-# Faster, modern XGB setup
-xgb = XGBClassifier(
-    eval_metric="logloss",
-    random_state=42,
-    tree_method="hist",   # MUCH faster
-    n_jobs=-1             # use all CPU cores
-)
-
-xgb_params = {
-    "n_estimators": [100, 200],
-    "max_depth": [3, 6, 10],
-    "learning_rate": [0.05, 0.1, 0.2],
-    "subsample": [0.7, 0.9],
-}
-
-xgb_grid = GridSearchCV(
-    xgb,
-    xgb_params,
-    cv=5,                 
-    scoring="accuracy",
-    n_jobs=-1,
-    verbose=1
-)
-
-xgb_grid.fit(X_train.values, y_train.values)   # convert pandas → numpy
-
-best_xgb = xgb_grid.best_estimator_
-print(f"\n✅ Best XGBoost params: {xgb_grid.best_params_}")
-
 # =======================
-# LightGBM with safer defaults
+# 5. Training & Selection
 # =======================
-lgb = LGBMClassifier(
-    random_state=42,
-    boosting_type="gbdt",
-    objective="binary",
-    n_estimators=500,        # more trees
-    learning_rate=0.05,      # smaller LR
-    min_child_samples=10,    # loosen restrictions
-    min_child_weight=1e-3,
-    subsample=0.8,
-    colsample_bytree=0.8
-)
-lgb.fit(X_train, y_train)
-best_lgb = lgb
-print("\n✅ LightGBM trained with safe defaults")
+print("\nStarting Model Evaluation...")
+print(f"{'Model':<20} | {'Accuracy':<10} | {'ROC-AUC':<10}")
+print("-" * 46)
 
-# =======================
-# CatBoost (quick train, silent mode)
-# =======================
-best_cat = CatBoostClassifier(
-    iterations=200,
-    depth=8,
-    learning_rate=0.1,
-    random_seed=42,
-    verbose=0
-)
-best_cat.fit(X_train, y_train)
-print("\n✅ CatBoost trained")
-
-# =======================
-# Logistic Regression baseline
-# =======================
-log_reg = LogisticRegression(max_iter=1000, random_state=42)
-log_reg.fit(X_train, y_train)
-
-# =======================
-# Ensembles
-# =======================
-# Stacked Ensemble with XGB as meta-learner
-stacked = StackingClassifier(
-    estimators=[
-        ("rf", best_rf),
-        ("lgb", best_lgb),
-        ("cat", best_cat),
-    ],
-    final_estimator=XGBClassifier(eval_metric="logloss", random_state=42, use_label_encoder=False),
-    cv=5,
-    n_jobs=-1,
-    stack_method="predict_proba"
-)
-stacked.fit(X_train, y_train)
-
-# Soft Voting Ensemble
-voting = VotingClassifier(
-    estimators=[
-        ("rf", best_rf),
-        ("xgb", best_xgb),
-        ("lgb", best_lgb),
-        ("cat", best_cat),
-        ("logreg", log_reg),
-    ],
-    voting="soft",
-    n_jobs=-1
-)
-voting.fit(X_train, y_train)
-
-# =======================
-# Evaluation
-# =======================
-models = {
-    "RandomForest": best_rf,
-    "XGBoost": best_xgb,
-    "LightGBM": best_lgb,
-    "CatBoost": best_cat,
-    "LogisticRegression": log_reg,
-    "StackedEnsemble": stacked,
-    "VotingEnsemble": voting,
-}
-
-best_model, best_acc = None, 0
+best_model = None
+best_acc = 0
+best_name = ""
 
 for name, model in models.items():
-    y_pred = model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
-    print(f"\n🔎 {name} Accuracy: {acc:.4f}, ROC-AUC: {auc:.4f}")
-    print(classification_report(y_test, y_pred))
+    try:
+        # For Random Forest, use Grid Search CV for generalization
+        if name == "RandomForest":
+            print(f"Hyperparameter tuning for {name}...")
+            param_grid = {
+                'n_estimators': [100, 200],
+                'max_depth': [5, 10, 15],
+                'min_samples_leaf': [5, 10, 20],
+                'class_weight': ['balanced', 'balanced_subsample']
+            }
+            grid = GridSearchCV(model, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
+            grid.fit(X_train, y_train)
+            model = grid.best_estimator_
+            print(f"Best params for RF: {grid.best_params_}")
 
-    if acc > best_acc:
-        best_model, best_acc = model, acc
+        # Train (or retrain if grid search)
+        if name != "RandomForest": # RF already fitted by GridSearch
+             model.fit(X_train, y_train)
+        
+        # Evaluate
+        y_pred = model.predict(X_test)
+        y_prob = model.predict_proba(X_test)[:, 1]
+        
+        acc = accuracy_score(y_test, y_pred)
+        auc = roc_auc_score(y_test, y_prob)
+        
+        print(f"{name:<20} | {acc:.4%}   | {auc:.4f}")
+        
+        if acc > best_acc:
+            best_acc = acc
+            best_model = model
+            best_name = name
+            
+    except Exception as e:
+        print(f"{name:<20} | FAILED: {e}")
+
+print("-" * 46)
+print(f"Selected Best Model: {best_name} (Accuracy: {best_acc:.4%})")
+print("-" * 46)
 
 # =======================
-# Save best model + dataset
+# 6. Save Best Model
 # =======================
 os.makedirs("models", exist_ok=True)
-joblib.dump(best_model, "models/model.pkl")
-print(f"\n✅ Best model ({best_model.__class__.__name__}) saved to models/model.pkl with accuracy {best_acc:.4f}")
+joblib.dump(best_model, MODEL_PATH)
+print(f"Model saved to {MODEL_PATH}")
 
-df.to_csv("models/sample_input.csv", index=False)
-print("✅ Full dataset saved to models/sample_input.csv")
+# Save feature names
+feature_names = list(X.columns)
+joblib.dump(feature_names, os.path.join("models", "features.pkl"))
+

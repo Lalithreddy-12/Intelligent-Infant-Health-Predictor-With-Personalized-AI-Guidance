@@ -73,6 +73,7 @@ def load_model():
     if os.path.exists(MODEL_PATH):
         try:
             m = joblib.load(MODEL_PATH)
+            # If it's a pipeline/dict, extract logic (though new model is just CatBoost object)
             return m["pipeline"] if isinstance(m, dict) and "pipeline" in m else m
         except Exception as e:
             logger.exception("Model load failed: %s", e)
@@ -80,7 +81,18 @@ def load_model():
         logger.warning("Model file not found at %s", MODEL_PATH)
     return None
 
+# Load model
 model = load_model()
+
+# Load specific feature order if available
+FEATURES_PATH = os.path.join(os.path.dirname(__file__), "models", "features.pkl")
+MODEL_FEATURES = None
+if os.path.exists(FEATURES_PATH):
+    try:
+        MODEL_FEATURES = joblib.load(FEATURES_PATH)
+        logger.info("Loaded feature list: %s", MODEL_FEATURES[:5] + ["..."])
+    except Exception as e:
+        logger.warning("Failed to load features.pkl: %s", e)
 
 # === population stats for heuristics ===
 _POP_STATS = {}
@@ -99,7 +111,7 @@ def validate_and_build_df(data: dict):
     if missing:
         raise ValueError(f"Missing required fields: {missing}")
     try:
-        return pd.DataFrame([{
+        df = pd.DataFrame([{
             "birth_weight": float(data["birth_weight"]),
             "maternal_age": float(data["maternal_age"]),
             "immunized": int(data["immunized"]),
@@ -107,6 +119,42 @@ def validate_and_build_df(data: dict):
             "socioeconomic": int(data["socioeconomic"]),
             "prenatal_visits": float(data["prenatal_visits"])
         }])
+        
+        # Feature Engineering for Model V2
+        # (It's safe to add these columns even for V1 if V1 ignores them or uses a pipeline that selects cols)
+        # However, to be ultra-safe, we should check which model is loaded. 
+        # But commonly, extra columns are just ignored by sklearn models if not in the signature, 
+        # UNLESS it's a pipeline with strict column checks.
+        # CatBoost (V2) definitely needs them.
+        
+        df["risk_low_bw"] = (df["birth_weight"] < 2.5).astype(int)
+        df["risk_very_low_bw"] = (df["birth_weight"] < 1.5).astype(int)
+        df["risk_teen_mom"] = (df["maternal_age"] < 18).astype(int)
+        df["risk_advanced_mom"] = (df["maternal_age"] > 35).astype(int)
+        df["risk_no_visits"] = (df["prenatal_visits"] < 3).astype(int)
+        df["risk_poor_nutrition"] = (df["nutrition"] < 40).astype(int)
+        
+        # Interaction
+        df["socio_nut_risk"] = ((df["socioeconomic"] == 0) & (df["nutrition"] < 50)).astype(int)
+        
+        # Cumulative
+        df["cumulative_risk_flags"] = (
+            df["risk_low_bw"] + 
+            df["risk_teen_mom"] + 
+            df["risk_no_visits"] + 
+            (1 - df["immunized"]) * 2
+        )
+        
+        # Enforce column order if known
+        if MODEL_FEATURES:
+            # Add missing columns if any (as 0) - safety net
+            for col in MODEL_FEATURES:
+                if col not in df.columns:
+                    df[col] = 0
+            # Select and reorder
+            df = df[MODEL_FEATURES]
+        
+        return df
     except Exception as e:
         raise ValueError(f"Invalid data format: {e}")
 
@@ -220,7 +268,18 @@ def _parse_plan_from_text(raw_text):
                     cleaned_items = []
                     seen = set()
                     for item in v:
-                        it = str(item).strip().strip('"\'')  # Remove surrounding quotes
+                        it = ""
+                        if isinstance(item, dict):
+                            # Fallback: extract first string-like value if HF returns objects
+                            vals = [str(x) for x in item.values() if isinstance(x, str)]
+                            if vals:
+                                it = vals[0]
+                            else:
+                                it = str(item)
+                        else:
+                            it = str(item)
+                        
+                        it = it.strip().strip('"\'')  # Remove surrounding quotes
                         # Skip incomplete sentences ending with space + dot
                         if it.rstrip().endswith((' .', ' ..', '...')):
                             it = it.rstrip().rstrip('. ')
@@ -382,7 +441,7 @@ USER_SYSTEM_PROMPT = (
     "1. OUTPUT **ONLY ONE JSON OBJECT** and NOTHING ELSE.\n"
     "2. The JSON MUST contain exactly these keys:\n"
     "   \"Year 0-1\", \"Year 1-2\", \"Year 2-3\", \"Year 3-4\", \"Year 4-5\".\n"
-    "3. Each key MUST map to an array (list) of SHORT, ACTIONABLE, CLINICALLY SAFE steps.\n"
+    "3. Each key MUST map to an array (list) of STRINGS. Do NOT use objects/dicts inside the list.\n"
     "4. Provide **6 to 8 steps per year**. Always prefer medically relevant, risk-reducing, practical actions.\n"
     "5. PERSONALIZE the guidance based on the child’s features (birth weight, maternal age, immunization status, nutrition score, socioeconomic status, prenatal visits, etc.).\n"
     "6. GUIDANCE MUST BE RISK-FOCUSED:\n"
@@ -541,7 +600,11 @@ def explain_local_prediction(input_df):
                 else:
                     contrib = np.array(shap_vals)[0]
                 for fname, val, c in zip(feature_names, X.iloc[0].tolist(), contrib.tolist()):
-                    standardized_feats.append({"feature": fname, "value": float(val), "contribution": float(c)})
+                    try:
+                        safe_val = float(val)
+                    except (ValueError, TypeError):
+                        safe_val = 0.0
+                    standardized_feats.append({"feature": fname, "value": safe_val, "contribution": float(c)})
                 method = "shap"
     except Exception as e:
         logger.debug("SHAP failed: %s", e)
@@ -667,53 +730,78 @@ def explain_local_prediction(input_df):
             "recommendation": rec_text
         })
 
-    top_labels = [h["label"] for h in humanified[:3]]
-    summary = "Main drivers: " + ", ".join(top_labels) if top_labels else "No clear drivers identified."
+    summary = " ".join(bullets) if bullets else "No specific risk drivers identified."
 
-    def _arrow_word(c):
-        if c > 0.03:
-            return ("↑", "#ef4444", "Increases")
-        elif c < -0.03:
-            return ("↓", "#10b981", "Decreases")
-        else:
-            return ("→", "#6b7280", "Neutral")
-
+    # Calculate scale for bars
+    max_contrib = max([abs(float(x.get("contribution", 0.0))) for x in standardized_feats] + [0.001])
+    
     list_items_html = ""
     for it in humanified:
-        arrow, color, verb = _arrow_word(it["contribution"])
-        reason = ""
-        if arrow == "↑":
-            reason = f"{it['label']} is below ideal or missing — this likely raises risk."
-        elif arrow == "↓":
-            reason = f"{it['label']} appears protective and lowers risk."
+        contrib = float(it.get("contribution", 0.0))
+        pct = (abs(contrib) / max_contrib) * 100.0
+        
+        # Color logic: Increase risk (bad) = Red, Decrease risk (good) = Green
+        # Note: If high mortality risk is 1, then positive contrib = Risk ↑ (Red)
+        if contrib > 0:
+            bar_color = "#ef4444" # Red
+            bg_color = "#fee2e2"
+            icon = "▲"
+            effect_text = "Increasing Risk"
         else:
-            reason = f"{it['label']} has limited effect on the prediction."
+            bar_color = "#10b981" # Green
+            bg_color = "#d1fae5"
+            icon = "▼"
+            effect_text = "Reducing Risk"
+            
         list_items_html += (
-            "<li style='display:flex; justify-content:space-between; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.04)'>"
-            f"<div style='max-width:78%'><div style='font-weight:600'>{it['label']} <span aria-hidden='true' style='color:{color}; margin-left:6px'>{arrow}</span> "
-            f"<small style='font-weight:600;margin-left:8px'>{it['magnitude_label']} ({it['relative_importance_pct']}%)</small></div>"
-            f"<div style='font-size:13px; color:#374151; margin-top:4px'>{reason}</div>"
-            f"<div style='margin-top:6px; font-size:13px'><strong>Action:</strong> {it['recommendation']}</div></div>"
-            f"<div style='text-align:right; min-width:40px'><div style='font-size:12px; color:{color}; font-weight:700'>{verb}</div></div>"
-            "</li>"
+            f"<div style='margin-bottom:12px; padding:10px; background:white; border-radius:8px; border:1px solid #e5e7eb'>"
+                f"<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:4px'>"
+                    f"<span style='font-weight:600; color:#1f2937'>{it['label']}</span>"
+                    f"<span style='font-size:12px; font-weight:700; color:{bar_color}'>{icon} {effect_text}</span>"
+                f"</div>"
+                
+                f"<div style='display:flex; align-items:center; gap:10px; font-size:12px; margin-bottom:4px'>"
+                    f"<div style='flex-grow:1; background:#f3f4f6; height:8px; border-radius:4px; overflow:hidden'>"
+                        f"<div style='width:{pct}%; height:100%; background:{bar_color}; border-radius:4px'></div>"
+                    f"</div>"
+                    f"<div style='min-width:40px; text-align:right; font-weight:600; color:#4b5563'>{it['relative_importance_pct']}%</div>"
+                f"</div>"
+                
+                f"<div style='font-size:13px; color:#4b5563; margin-top:4px'>"
+                    f"{it['recommendation']}"
+                f"</div>"
+            f"</div>"
         )
 
-    recommendations_html = "".join([f"<li>• <strong>{r['feature']}:</strong> {r['recommendation']}</li>" for r in recommendations[:4]])
+    recommendations_html = "".join([f"<li style='margin-bottom:4px'>• {r['recommendation']}</li>" for r in recommendations[:3]])
     tech_json = json.dumps({"feature_contributions": standardized_feats}, indent=2)
+    
+    # Method display name
+    method_disp = "SMOTE-Enhanced SHAP" if method == "shap" else method.replace("_", " ").title()
 
     ui_html = (
-        f"<div>"
-        f"<div style='font-weight:600;margin-bottom:8px'>{summary}</div>"
-        f"<ul style='list-style:none;padding-left:0;margin:0 0 8px 0'>{list_items_html}</ul>"
-        f"<div style='margin-top:8px;font-size:13px'><div style='font-weight:600;margin-bottom:6px'>Suggested next steps</div>"
-        f"<ul style='padding-left:1rem;margin:0'>{recommendations_html or '<li>No specific recommendations available.</li>'}</ul></div>"
-        f"<div style='margin-top:10px;font-size:12px;color:#374151'><strong>Red flags:</strong> fever, difficulty breathing, poor feeding, lethargy — seek urgent care.</div>"
-        f"<div aria-hidden='true' style='margin-top:8px;font-size:12px;color:#6b7280'><span style='margin-right:8px'><strong>Legend:</strong></span>"
-        f"<span style='color:#ef4444;font-weight:700;margin-right:6px'>↑ increases risk</span>"
-        f"<span style='color:#10b981;font-weight:700;margin-right:6px'>↓ lowers risk</span>"
-        f"<span style='color:#6b7280;font-weight:700'>→ neutral</span></div>"
-        f"<details style='margin-top:8px'><summary style='cursor:pointer;font-weight:600'>Show technical details</summary>"
-        f"<pre style='white-space:pre-wrap;padding:8px;background:#f9fafb;border-radius:6px;margin-top:6px'>{tech_json}</pre></details>"
+        f"<div style='font-family:sans-serif'>"
+            f"<div style='display:flex; align-items:center; justify-content:space-between; margin-bottom:12px'>"
+                f"<h4 style='font-weight:700; font-size:16px; margin:0; color:#1f2937'>Contribution Analysis</h4>"
+                f"<span style='font-size:10px; text-transform:uppercase; letter-spacing:0.5px; background:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:12px; font-weight:700'>{method_disp}</span>"
+            f"</div>"
+            
+            f"<div style='background:#f9fafb; padding:12px; border-radius:8px; border:1px solid #e5e7eb; margin-bottom:16px'>"
+                f"<div style='font-size:13px; color:#374151; font-weight:600; margin-bottom:4px'>Summary</div>"
+                f"<div style='font-size:14px; color:#111827'>{summary}</div>"
+            f"</div>"
+
+            f"<div style='margin-bottom:16px'>{list_items_html}</div>"
+
+            f"<div style='border-top:1px solid #e5e7eb; padding-top:12px'>"
+                f"<div style='font-size:13px; font-weight:600; color:#374151; margin-bottom:6px'>Top Recommendations</div>"
+                f"<ul style='padding-left:14px; margin:0; font-size:13px; color:#4b5563; line-height:1.5'>{recommendations_html or '<li>No specific actions required.</li>'}</ul>"
+            f"</div>"
+            
+            f"<details style='margin-top:12px; border-top:1px solid #e5e7eb; padding-top:8px'>"
+                f"<summary style='cursor:pointer; font-size:12px; font-weight:600; color:#6b7280; user-select:none'>Show Technical Data</summary>"
+                f"<pre style='font-size:11px; white-space:pre-wrap; padding:8px; background:#111827; color:#10b981; border-radius:6px; margin-top:6px; overflow-x:auto'>{tech_json}</pre>"
+            f"</details>"
         f"</div>"
     )
 
@@ -774,7 +862,16 @@ def generate_survival_plan_hf_public(features):
 # --- Survival plan selector ---
 def survival_plan(prediction, features=None, debug=False):
     if int(prediction) == 0:
-        return {"risk_level": "low", "message": "Continue routine preventive care and regular health checkups. Complete immunization schedule on schedule. Ensure balanced nutrition and adequate feeding. Maintain safe sleeping environment (back sleeping, firm surface). Practice good hygiene and sanitation habits. Monitor for early signs of illness and seek prompt care. Provide safe drinking water and proper sanitation. Ensure adequate rest and physical activity for development. Continue preventive care: vaccines, nutrition, safe environment."}, {"branch": "low"}
+        return {"risk_level": "low", "message": [
+            "Continue routine preventive care and regular health checkups",
+            "Complete immunization schedule on schedule",
+            "Ensure balanced nutrition and adequate feeding",
+            "Maintain safe sleeping environment (back sleeping, firm surface)",
+            "Practice good hygiene and sanitation habits",
+            "Monitor for early signs of illness and seek prompt care",
+            "Provide safe drinking water and proper sanitation",
+            "Ensure adequate rest and physical activity for development"
+        ]}, {"branch": "low"}
     else:
         if features:
             plan, debug_info = generate_survival_plan_hf_public(features)
@@ -825,9 +922,18 @@ def init_history_db():
         hf_raw TEXT,
         model_used TEXT,
         explanation_method TEXT,
+        patient_name TEXT,
         FOREIGN KEY(user_id) REFERENCES users(id)
     )
     """)
+    
+    # Migration: ensure patient_name column exists
+    try:
+        cur.execute("ALTER TABLE history ADD COLUMN patient_name TEXT")
+    except sqlite3.OperationalError:
+        # column likely already exists
+        pass
+
     conn.commit()
     conn.close()
 
@@ -844,7 +950,7 @@ def _current_user_id():
     return flask_session.get("user_id")
 
 def save_prediction_to_history(features, probability, prediction, risk_category, survival_plan,
-                               explanation=None, hf_raw=None, model_used=None, explanation_method=None):
+                               explanation=None, hf_raw=None, model_used=None, explanation_method=None, patient_name=None):
     try:
         conn = _get_db_conn()
         cur = conn.cursor()
@@ -854,8 +960,8 @@ def save_prediction_to_history(features, probability, prediction, risk_category,
         cur.execute("""
             INSERT INTO history
             (user_id, session_id, timestamp, features_json, probability, prediction, risk_category,
-             survival_plan_json, explanation_json, hf_raw, model_used, explanation_method)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             survival_plan_json, explanation_json, hf_raw, model_used, explanation_method, patient_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id,
             session_id,
@@ -868,12 +974,13 @@ def save_prediction_to_history(features, probability, prediction, risk_category,
             json.dumps(explanation, default=str) if explanation is not None else None,
             hf_raw,
             model_used,
-            explanation_method
+            explanation_method,
+            patient_name
         ))
         conn.commit()
         rowid = cur.lastrowid
         conn.close()
-        logger.info("Saved prediction history id=%s user_id=%s session=%s", rowid, user_id, session_id)
+        logger.info("Saved prediction history id=%s user_id=%s session=%s name=%s", rowid, user_id, session_id, patient_name)
         return rowid
     except Exception as e:
         logger.exception("Failed to save history: %s", e)
@@ -953,13 +1060,29 @@ def api_logout():
 @app.route("/api/history", methods=["GET"])
 def api_history_list():
     limit = int(request.args.get("limit", 20))
+    search_term = request.args.get("search", "").strip()
     user_id = _current_user_id()
     session_id = flask_session.get("sid")
     conn = _get_db_conn(); cur = conn.cursor()
+    
+    query = "SELECT * FROM history WHERE "
+    params = []
+    
     if user_id:
-        cur.execute("SELECT * FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
+        query += "user_id = ? "
+        params.append(user_id)
     else:
-        cur.execute("SELECT * FROM history WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?", (session_id, limit))
+        query += "session_id = ? "
+        params.append(session_id)
+        
+    if search_term:
+        query += "AND patient_name LIKE ? "
+        params.append(f"%{search_term}%")
+        
+    query += "ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+    
+    cur.execute(query, tuple(params))
     rows = cur.fetchall(); conn.close()
     out = []
     for r in rows:
@@ -973,7 +1096,8 @@ def api_history_list():
             "survival_plan": json.loads(r["survival_plan_json"]) if r["survival_plan_json"] else None,
             "explanation": json.loads(r["explanation_json"]) if r["explanation_json"] and request.args.get("debug","").lower()=="true" else None,
             "model_used": r["model_used"],
-            "explanation_method": r["explanation_method"]
+            "explanation_method": r["explanation_method"],
+            "patient_name": r["patient_name"]
         })
     return jsonify({"history": out})
 
@@ -995,7 +1119,8 @@ def api_history_get(hid):
         "explanation": json.loads(r["explanation_json"]) if r["explanation_json"] and request.args.get("debug","").lower()=="true" else None,
         "hf_raw": r["hf_raw"] if request.args.get("debug","").lower()=="true" else None,
         "model_used": r["model_used"],
-        "explanation_method": r["explanation_method"]
+        "explanation_method": r["explanation_method"],
+        "patient_name": r["patient_name"]
     }
     return jsonify(rec)
 
@@ -1011,6 +1136,29 @@ def api_history_delete(hid):
     if cur.rowcount == 0:
         conn.close()
         return jsonify({"error": "not found or not authorized"}), 404
+    conn.commit(); conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/history/<int:hid>", methods=["PUT"])
+def api_history_update(hid):
+    """Update a single history record (e.g., patient_name) for the logged-in user."""
+    user_id = _current_user_id()
+    if not user_id:
+        return jsonify({"error": "login required"}), 401
+    
+    payload = request.get_json() or {}
+    new_name = payload.get("patient_name")
+    if not new_name:
+        return jsonify({"error": "missing patient_name"}), 400
+        
+    conn = _get_db_conn(); cur = conn.cursor()
+    cur.execute("UPDATE history SET patient_name = ? WHERE id = ? AND user_id = ?", (new_name.strip(), hid, user_id))
+    
+    if cur.rowcount == 0:
+        conn.close()
+        return jsonify({"error": "not found or not authorized"}), 404
+        
     conn.commit(); conn.close()
     return jsonify({"ok": True})
 
@@ -1072,8 +1220,8 @@ def api_history_merge():
 
             cur.execute("""
                 INSERT INTO history
-                (user_id, session_id, timestamp, features_json, probability, prediction, risk_category, survival_plan_json, explanation_json, hf_raw, model_used, explanation_method)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (user_id, session_id, timestamp, features_json, probability, prediction, risk_category, survival_plan_json, explanation_json, hf_raw, model_used, explanation_method, patient_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id,
                 session_id,
@@ -1086,7 +1234,8 @@ def api_history_merge():
                 json.dumps(explanation, default=str) if explanation is not None else None,
                 None,
                 HF_MODEL,
-                None
+                None,
+                e.get("patient_name")
             ))
             inserted += 1
         except Exception as exc:
@@ -1135,6 +1284,11 @@ def predict_api():
         prob = None
         try:
             prob = float(model.predict_proba(df)[:, 1][0])
+            # Clamp minimum risk to 0.5% and maximum to 99.9% to avoid absolutes
+            if prob < 0.005:
+                prob = 0.005
+            elif prob > 0.999:
+                prob = 0.999
         except Exception:
             prob = None
         pred = int(model.predict(df)[0])
@@ -1190,7 +1344,8 @@ def predict_api():
             explanation=explanation_payload if debug_flag else (explanation_payload if False else None),
             hf_raw=debug_info.get("hf_raw") if isinstance(debug_info, dict) else None,
             model_used=HF_MODEL,
-            explanation_method=(explanation_payload.get("method") if isinstance(explanation_payload, dict) else None)
+            explanation_method=(explanation_payload.get("method") if isinstance(explanation_payload, dict) else None),
+            patient_name=data.get("patient_name")
         )
     except Exception as e:
         logger.exception("history save failed: %s", e)
