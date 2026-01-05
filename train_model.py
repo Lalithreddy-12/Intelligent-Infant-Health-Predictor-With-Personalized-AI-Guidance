@@ -51,16 +51,14 @@ X = df.drop("mortality", axis=1)
 y = df["mortality"]
 
 # =======================
-# 3. Balancing (Matching compare_models.py logic for consistency)
+# 3. Splitting & Balancing (CORRECTED)
 # =======================
-# Using SMOTE to balance the dataset before splitting to maximize signal capture for this synthetic dataset
+# CRITICAL FIX: Split FIRST, then balance ONLY the training set.
+# This prevents data leakage and ensures generalized probabilities.
 print(f"Original class distribution: {dict(y.value_counts())}")
-smote = SMOTE(random_state=42)
-X_res, y_res = smote.fit_resample(X, y)
-print(f"Balanced class distribution: {dict(y_res.value_counts())}")
 
 X_train, X_test, y_train, y_test = train_test_split(
-    X_res, y_res, test_size=0.2, random_state=42, stratify=y_res
+    X, y, test_size=0.2, random_state=42, stratify=y
 )
 
 # =======================
@@ -68,10 +66,18 @@ X_train, X_test, y_train, y_test = train_test_split(
 # =======================
 print("\nInitializing models...")
 
+# Define SMOTE for pipelines and manual application
+smote = SMOTE(random_state=42)
+
+# Models
+# Note: For tree-based models, we often don't strictly need SMOTE if we use class_weight,
+# but we will use it to be consistent with the user's request for handling the dataset.
 rf = RandomForestClassifier(n_estimators=200, max_depth=10, min_samples_leaf=5, random_state=42)
 xgb = XGBClassifier(eval_metric="logloss", n_estimators=100, max_depth=6, learning_rate=0.1, n_jobs=-1, random_state=42)
 cat = CatBoostClassifier(iterations=1000, learning_rate=0.05, depth=6, verbose=0, random_state=42)
 lr = LogisticRegression(max_iter=1000, random_state=42)
+
+# For Voting, we train on the SMOTE-resampled training set
 voting = VotingClassifier(
         estimators=[('rf', rf), ('xgb', xgb), ('cat', cat)],
         voting='soft'
@@ -89,10 +95,8 @@ models = {
 # 5. Training & Selection
 # =======================
 from sklearn.model_selection import GridSearchCV
+from imblearn.pipeline import Pipeline as ImbPipeline
 
-# =======================
-# 5. Training & Selection
-# =======================
 print("\nStarting Model Evaluation...")
 print(f"{'Model':<20} | {'Accuracy':<10} | {'ROC-AUC':<10}")
 print("-" * 46)
@@ -101,32 +105,54 @@ best_model = None
 best_acc = 0
 best_name = ""
 
+# Pre-calculate resampled training data for non-pipeline models to save time
+print("Resampling training data for standalone models...")
+X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+print(f"Balanced training distribution: {dict(y_train_res.value_counts())}")
+
 for name, model in models.items():
     try:
-        # For Random Forest, use Grid Search CV for generalization
+        # For Random Forest, use Grid Search CV with Pipeline to prevent leakage during CV
         if name == "RandomForest":
-            print(f"Hyperparameter tuning for {name}...")
+            print(f"Hyperparameter tuning for {name} with CV=10...")
+            
+            # Create a pipeline: SMOTE -> Classifier
+            pipeline = ImbPipeline([
+                ('smote', SMOTE(random_state=42)),
+                ('clf', model)
+            ])
+            
             param_grid = {
-                'n_estimators': [100, 200],
-                'max_depth': [5, 10, 15],
-                'min_samples_leaf': [5, 10, 20],
-                'class_weight': ['balanced', 'balanced_subsample']
+                'clf__n_estimators': [100, 200],
+                'clf__max_depth': [5, 10], # Reduced search space slightly for speed with 10 folds
+                'clf__min_samples_leaf': [5, 10],
+                'clf__class_weight': ['balanced', None] 
             }
-            grid = GridSearchCV(model, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
-            grid.fit(X_train, y_train)
+            
+            # CV=10 as requested
+            grid = GridSearchCV(pipeline, param_grid, cv=10, scoring='accuracy', n_jobs=-1)
+            grid.fit(X_train, y_train) 
+            
+            # The best estimator is the pipeline. 
+            # We can extract the classifier if needed, but for prediction we should use the pipeline 
+            # if we want to apply transformations. However, SMOTE is only for training.
+            # So the 'best_estimator_' allows predict() which does NOT run SMOTE (correct behavior).
             model = grid.best_estimator_
             print(f"Best params for RF: {grid.best_params_}")
 
-        # Train (or retrain if grid search)
-        if name != "RandomForest": # RF already fitted by GridSearch
-             model.fit(X_train, y_train)
+        else:
+            # Train on the pre-resampled data
+            model.fit(X_train_res, y_train_res)
         
-        # Evaluate
+        # Evaluate on the ORIGINAL X_test (never seen, never resampled)
         y_pred = model.predict(X_test)
-        y_prob = model.predict_proba(X_test)[:, 1]
+        if hasattr(model, "predict_proba"):
+             y_prob = model.predict_proba(X_test)[:, 1]
+        else:
+             y_prob = [0]*len(y_test)
         
         acc = accuracy_score(y_test, y_pred)
-        auc = roc_auc_score(y_test, y_prob)
+        auc = roc_auc_score(y_test, y_prob) if len(set(y_test)) > 1 else 0.5
         
         print(f"{name:<20} | {acc:.4%}   | {auc:.4f}")
         
@@ -137,6 +163,7 @@ for name, model in models.items():
             
     except Exception as e:
         print(f"{name:<20} | FAILED: {e}")
+        # traceback.print_exc()
 
 print("-" * 46)
 print(f"Selected Best Model: {best_name} (Accuracy: {best_acc:.4%})")

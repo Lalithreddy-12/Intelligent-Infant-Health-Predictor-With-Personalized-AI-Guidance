@@ -6,7 +6,6 @@ from sklearn.ensemble import RandomForestClassifier, StackingClassifier, VotingC
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score, roc_auc_score
 from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 from imblearn.over_sampling import SMOTE
 
@@ -43,27 +42,33 @@ def compare_models():
     X = df.drop("mortality", axis=1)
     y = df["mortality"]
 
-    # 3. Balancing
-    print(f"Original class distribution: {dict(y.value_counts())}")
-    smote = SMOTE(random_state=42)
-    X_res, y_res = smote.fit_resample(X, y)
-    print(f"Balanced class distribution: {dict(y_res.value_counts())}")
+    X = df.drop("mortality", axis=1)
+    y = df["mortality"]
 
+    # 3. Splitting & Balancing (CORRECTED)
+    # -----------------------------------
+    # Fix: Split data FIRST, then apply SMOTE only to training set.
+    # This prevents synthetic data leakage into the test set.
+    print(f"Original class distribution: {dict(y.value_counts())}")
+    
     X_train, X_test, y_train, y_test = train_test_split(
-        X_res, y_res, test_size=0.2, random_state=42, stratify=y_res
+        X, y, test_size=0.2, random_state=42, stratify=y
     )
+
+    print("Applying SMOTE to training data only...")
+    smote = SMOTE(random_state=42)
+    X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+    print(f"Balanced training split distribution: {dict(y_train_res.value_counts())}")
 
     # 4. Models
     print("\nInitializing models...")
     
     # RandomForest
-    rf = RandomForestClassifier(n_estimators=100, max_depth=20, random_state=42)
+    # Matching train_model.py best params: max_depth=10, min_samples_leaf=5, n_estimators=200
+    rf = RandomForestClassifier(n_estimators=200, max_depth=10, min_samples_leaf=5, random_state=42)
     
     # XGBoost
     xgb = XGBClassifier(eval_metric="logloss", n_estimators=100, max_depth=6, learning_rate=0.1, n_jobs=-1, random_state=42)
-    
-    # LightGBM
-    lgb = LGBMClassifier(n_estimators=500, learning_rate=0.05, verbose=-1, random_state=42)
     
     # CatBoost (Optimized)
     cat = CatBoostClassifier(iterations=1000, learning_rate=0.05, depth=6, verbose=0, random_state=42)
@@ -72,6 +77,7 @@ def compare_models():
     lr = LogisticRegression(max_iter=1000, random_state=42)
 
     # Ensembles
+    # Note: Ensemble will be trained on the RESAMPLED data
     voting = VotingClassifier(
         estimators=[('rf', rf), ('xgb', xgb), ('cat', cat)],
         voting='soft'
@@ -81,12 +87,11 @@ def compare_models():
         "LogisticRegression": lr,
         "RandomForest": rf,
         "XGBoost": xgb,
-        "LightGBM": lgb,
         "CatBoost": cat,
         "VotingEnsemble": voting
     }
 
-    print("\nTraining and Evaluating...")
+    print("\nTraining and Evaluating (Test set is pure/unseen)...")
     print(f"{'Model':<20} | {'Accuracy':<10} | {'ROC-AUC':<10}")
     print("-" * 46)
 
@@ -94,7 +99,10 @@ def compare_models():
 
     for name, model in models.items():
         try:
-            model.fit(X_train, y_train)
+            # Train on balanced training set
+            model.fit(X_train_res, y_train_res)
+            
+            # Evaluate on pure original test set
             if hasattr(model, "predict_proba"):
                 y_prob = model.predict_proba(X_test)[:, 1]
                 auc = roc_auc_score(y_test, y_prob)
