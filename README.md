@@ -10,10 +10,26 @@ This application serves as a **Clinical Decision Support System (CDSS)** demo. I
 
 The system is designed to be **transparent** (via SHAP explanations) and **actionable** (via LLM-generated guidance), helping healthcare workers prioritize high-risk cases.
 
-> [!WARNING]
-> **Disclaimer**: This project uses synthetic data for demonstration purposes. **Do NOT use for real clinical diagnosis.** Replace the model with one trained on validated medical datasets (e.g., DHS, WHO) before real-world deployment.
 
----
+***
+
+## 🌍 The Challenge & Our Contribution
+
+### The Problem: A Persistent Global Crisis
+Despite global progress, **infant mortality remains a critical public health challenge**.
+- **Current Reality**: In 2022 alone, an estimated **4.9 million children under 5** died, with nearly half of these deaths occurring in the first month of life (neonatal period).
+- **Stalled Progress**: While rates have dropped historically, the *pace of reduction has slowed* significantly in recent years.
+- **Preventable Drivers**: The majority of these deaths are due to **preventable or treatable causes** such as preterm birth complications, pneumonia, and sepsis.
+- **The Gap**: In many high-risk regions, healthcare workers lack immediate, data-driven tools to identify which infants are most vulnerable *before* complications arise.
+
+### 💡 How This Project Contributes
+This application bridges the gap between **raw medical data** and **life-saving intent**:
+1.  **Early Identification**: By using machine learning to analyze risk factors (birth weight, nutrition, immunization), we can flag high-risk infants who might otherwise look healthy.
+2.  **Resource Prioritization**: Identifying "High Risk" cases allows limited healthcare resources to be targeted where they are needed most.
+3.  **Actionable Guidance**: Instead of just a "Risk Score," we provide a **personalized 5-year survival plan**, empowering parents and caregivers with specific, WHO-aligned steps (e.g., "Monitor for jaundice," "Ensure DPT booster") to actively reduce that risk.
+
+***
+
 
 ## ✨ Key Features
 
@@ -83,8 +99,8 @@ Child-Mortality-Prediction/
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-username/child-mortality-prediction.git
-cd child-mortality-prediction
+git clone https://github.com/your-username/Intelligent-Infant-Health-Predictor-With-Personalized-AI-Guidance.git
+cd Intelligent-Infant-Health-Predictor-With-Personalized-AI-Guidance
 ```
 
 ### 2. Create Virtual Environment
