@@ -7,7 +7,7 @@ import uuid
 import sqlite3
 import traceback
 from functools import lru_cache
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_from_directory, session as flask_session
 from huggingface_hub import InferenceClient
@@ -572,6 +572,7 @@ def explain_local_prediction(input_df):
       - ui_html (user-friendly HTML snippet)
     """
     if model is None:
+        logger.error("explain_local_prediction: model is None")
         return {"error": "no_local_model"}
 
     X = input_df.copy()
@@ -579,107 +580,119 @@ def explain_local_prediction(input_df):
     standardized_feats = []
     method = "unknown"
 
-    # SHAP
-    try:
-        if _HAS_SHAP:
+    # 1. Try SHAP
+    if _HAS_SHAP:
+        try:
             core_model = model
             if hasattr(model, "named_steps") and "model" in model.named_steps:
                 core_model = model.named_steps["model"]
+            
             expl = None
-            try:
-                if hasattr(core_model, "feature_importances_") or core_model.__class__.__name__.lower().startswith(("lgbm","xgboost","catboost","randomforest")):
-                    expl = shap.TreeExplainer(core_model)
-                else:
-                    expl = shap.KernelExplainer(core_model.predict_proba, X)
-            except Exception:
-                expl = None
-            if expl is not None:
+            # CatBoost / Tree models
+            if hasattr(core_model, "feature_importances_") or core_model.__class__.__name__.lower().startswith(("lgbm","xgboost","catboost","randomforest")):
+                expl = shap.TreeExplainer(core_model)
+            # Kernel fallback
+            else:
+                # Limit background samples for speed
+                bg = shap.sample(X, 10) if len(X) > 10 else X
+                expl = shap.KernelExplainer(core_model.predict_proba, bg)
+            
+            if expl:
                 shap_vals = expl.shap_values(X)
-                if isinstance(shap_vals, list) and len(shap_vals) >= 2:
-                    contrib = np.array(shap_vals[1])[0]
-                else:
-                    contrib = np.array(shap_vals)[0]
-                for fname, val, c in zip(feature_names, X.iloc[0].tolist(), contrib.tolist()):
-                    try:
-                        safe_val = float(val)
-                    except (ValueError, TypeError):
-                        safe_val = 0.0
-                    standardized_feats.append({"feature": fname, "value": safe_val, "contribution": float(c)})
-                method = "shap"
-    except Exception as e:
-        logger.debug("SHAP failed: %s", e)
+                contrib = None
+                
+                # Case 1: List of arrays (e.g. classification with [class0, class1])
+                if isinstance(shap_vals, list):
+                    if len(shap_vals) > 1:
+                        # Binary/Multiclass: take class 1 (positive risk)
+                        raw = np.array(shap_vals[1])
+                    else:
+                        raw = np.array(shap_vals[0])
+                    
+                    # Flatten to 1D: (1, F) -> (F,)
+                    if len(raw.shape) > 1:
+                        contrib = raw[0]
+                    else:
+                        contrib = raw
 
-    # Linear coefficients
+                # Case 2: Numpy Array
+                elif isinstance(shap_vals, np.ndarray):
+                    # shape (1, Features, OutputClasses) -> (1, F, 2)
+                    if len(shap_vals.shape) == 3:
+                         # Take first sample, all features, class 1 (if exists) or 0
+                         idx = 1 if shap_vals.shape[2] > 1 else 0
+                         contrib = shap_vals[0, :, idx]
+                    
+                    # shape (1, Features) -> (1, F)
+                    elif len(shap_vals.shape) == 2:
+                        contrib = shap_vals[0]
+                    
+                    # shape (Features,) -> (F,)
+                    else:
+                        contrib = shap_vals
+
+                if contrib is not None and len(contrib) == len(feature_names):
+                    for fname, val, c in zip(feature_names, X.iloc[0].tolist(), contrib.tolist()):
+                        standardized_feats.append({"feature": fname, "value": float(val), "contribution": float(c)})
+                    method = "shap"
+
+        except Exception as e:
+            logger.warning(f"SHAP explanation failed: {e}")
+
+    # 2. Fallback: Linear Coefs (if applicable)
     if not standardized_feats:
         try:
             core = model
             if hasattr(model, "named_steps") and "model" in model.named_steps:
                 core = model.named_steps["model"]
             if hasattr(core, "coef_"):
-                try:
-                    X_trans = X.copy()
-                    if hasattr(model, "named_steps"):
-                        if "preproc" in model.named_steps:
-                            X_trans = pd.DataFrame(model.named_steps["preproc"].transform(X_trans), columns=X_trans.columns)
-                except Exception:
-                    X_trans = X.copy()
                 coefs = core.coef_.ravel()
-                for fname, val, coef in zip(feature_names, X.iloc[0].tolist(), coefs.tolist()):
-                    contribution = float(coef * float(val))
-                    standardized_feats.append({"feature": fname, "value": float(val), "contribution": contribution})
-                method = "linear_coef"
+                if len(coefs) == len(feature_names):
+                    for fname, val, coef in zip(feature_names, X.iloc[0].tolist(), coefs.tolist()):
+                        standardized_feats.append({"feature": fname, "value": float(val), "contribution": float(coef * float(val))})
+                    method = "linear_coef"
         except Exception as e:
-            logger.debug("Linear coef explanation failed: %s", e)
+            logger.warning(f"Linear coef explanation failed: {e}")
 
-    # Permutation importance
+    # 3. Fallback: Robust Heuristic (Always attempts this if others fail)
     if not standardized_feats:
         try:
-            try:
-                ref = pd.read_csv(os.path.join("models", "sample_input.csv"))
-                ref = ref[list(X.columns)]
-                ref_y = np.zeros(len(ref))
-            except Exception:
-                ref = pd.concat([X] * 12, ignore_index=True)
-                ref_y = np.zeros(len(ref))
-            r = permutation_importance(model, ref, ref_y, n_repeats=6, random_state=42, n_jobs=-1)
-            importances = r.importances_mean
-            for fname, val, imp in zip(X.columns, X.iloc[0].tolist(), importances.tolist()):
-                standardized_feats.append({"feature": fname, "value": float(val), "contribution": float(imp)})
-            method = "permutation"
-        except Exception as e:
-            logger.debug("Permutation importance failed: %s", e)
-
-    # Heuristic fallback
-    if not standardized_feats:
-        try:
+            # Try to get importance weights
             core = model
             if hasattr(model, "named_steps") and "model" in model.named_steps:
                 core = model.named_steps["model"]
-            imp_scores = None
+            
+            weights = np.ones(len(feature_names))
             if hasattr(core, "feature_importances_"):
-                imp_scores = np.array(core.feature_importances_)
-                if imp_scores.sum() != 0:
-                    imp_scores = imp_scores / (imp_scores.sum())
-            for i, (fname, val) in enumerate(zip(X.columns, X.iloc[0].tolist())):
+                fi = core.feature_importances_
+                if len(fi) == len(feature_names):
+                    weights = fi / (fi.sum() + 1e-9)
+            
+            # Z-score heuristic
+            for i, (fname, val) in enumerate(zip(feature_names, X.iloc[0].tolist())):
                 median = _POP_STATS.get("median", {}).get(fname, 0.0)
                 std = _POP_STATS.get("std", {}).get(fname, 1.0)
-                z = (float(val) - float(median)) / float(std) if std != 0 else 0.0
-                weight = 1.0
-                if imp_scores is not None:
-                    try:
-                        weight = float(imp_scores[i])
-                    except Exception:
-                        weight = 1.0
-                contrib = float(z * weight)
+                if std == 0: std = 1.0
+                
+                # Z-score * Model Weight
+                z = (float(val) - float(median)) / float(std)
+                contrib = z * float(weights[i])
+                
                 standardized_feats.append({"feature": fname, "value": float(val), "contribution": contrib})
             method = "heuristic"
         except Exception as e:
-            logger.debug("Heuristic failed: %s", e)
+            logger.error(f"Heuristic explanation failed: {e}")
+            # Absolute fallback: just show input values as 'contributions' to avoid empty
+            for fname, val in zip(feature_names, X.iloc[0].tolist()):
+                 standardized_feats.append({"feature": fname, "value": float(val), "contribution": 0.01})
+            method = "fallback_display"
 
     if not standardized_feats:
-        return {"error": "explanation_failed"}
+         return {"error": "explanation_failed2"}
 
+    # Sort by absolute contribution
     standardized_feats = sorted(standardized_feats, key=lambda x: abs(x.get("contribution", 0.0)), reverse=True)
+
 
     FRIENDLY = {
         "birth_weight": ("Birth weight", "Provide feeding support and frequent weight checks; monitor growth."),
@@ -687,16 +700,36 @@ def explain_local_prediction(input_df):
         "immunized": ("Immunization status", "Keep vaccinations on schedule and follow local immunization program."),
         "nutrition": ("Nutrition score", "Offer breastfeeding support and nutrient-rich complementary foods."),
         "socioeconomic": ("Socioeconomic status", "Link family to community resources and social support."),
-        "prenatal_visits": ("Prenatal visits", "Arrange antenatal follow-up and skilled birth attendance.")
+        "prenatal_visits": ("Prenatal visits", "Arrange antenatal follow-up and skilled birth attendance."),
+        "risk_low_bw": ("Low Birth Weight", "Monitor specifically for low birth weight complications."),
+        "risk_very_low_bw": ("Very Low Birth Weight", "Refer to specialized neonatal care immediately."),
+        "risk_teen_mom": ("Young Maternal Age", "Provide extra monitoring and social support."),
+        "risk_advanced_mom": ("Advanced Maternal Age", "Screen for age-related pregnancy complications."),
+        "risk_no_visits": ("Lack of Prenatal Visits", "Urgent antenatal screening required."),
+        "risk_poor_nutrition": ("Poor Nutrition", "Urgent nutritional rehabilitation needed."),
+        "socio_nut_risk": ("Socio-Nutritional Vulnerability", "Combine social support with nutritional program."),
+        "cumulative_risk_flags": ("Multiple Risk Factors", "High alert: Multiple risk factors present.")
     }
 
     total_abs = sum(abs(float(x.get("contribution", 0.0))) for x in standardized_feats) or 1.0
     humanified = []
     top_n = min(6, len(standardized_feats))
     top_feats = standardized_feats[:top_n]
-    bullets = []
+    
+    risk_factors = []
+    protective_factors = []
     recommendations = []
     positive_sum = 0.0
+
+    # Identify specific risk flags for the "Multiple Risk Factors" feature
+    active_risk_flags = []
+    if int(X.iloc[0].get("risk_low_bw", 0)) == 1: active_risk_flags.append("Low Birth Weight")
+    if int(X.iloc[0].get("risk_very_low_bw", 0)) == 1: active_risk_flags.append("Very Low Birth Weight")
+    if int(X.iloc[0].get("risk_teen_mom", 0)) == 1: active_risk_flags.append("Young Maternal Age")
+    if int(X.iloc[0].get("risk_advanced_mom", 0)) == 1: active_risk_flags.append("Advanced Maternal Age")
+    if int(X.iloc[0].get("risk_no_visits", 0)) == 1: active_risk_flags.append("No Prenatal Visits")
+    if int(X.iloc[0].get("immunized", 1)) == 0: active_risk_flags.append("Not Immunized")
+    if int(X.iloc[0].get("risk_poor_nutrition", 0)) == 1: active_risk_flags.append("Poor Nutrition")
 
     for item in top_feats:
         feat = item["feature"]
@@ -710,15 +743,50 @@ def explain_local_prediction(input_df):
         else:
             magnitude = "Minor"
         direction = "Increase" if contrib > 0.03 else ("Decrease" if contrib < -0.03 else "Neutral")
+        
+        # Get base label and text
         label, rec_text = FRIENDLY.get(feat, (feat.replace("_", " ").capitalize(), "Follow routine clinical care and monitoring."))
+        
+        # DYNAMIC LABELING for Protective Factors (Prevent "Protective Factors: Poor Nutrition")
+        if direction == "Decrease":
+            if feat == "risk_poor_nutrition" and val == 0:
+                label = "Adequate Nutrition"
+            elif feat == "risk_low_bw" and val == 0:
+                label = "Healthy Birth Weight"
+            elif feat == "risk_very_low_bw" and val == 0:
+                 label = "No Very Low Birth Weight"
+            elif feat == "risk_teen_mom" and val == 0:
+                label = "Optimal Maternal Age"
+            elif feat == "risk_no_visits" and val == 0:
+                label = "Regular Prenatal Visits"
+            elif feat == "cumulative_risk_flags":
+                # If value is low, it means few/no risks
+                if val <= 1:
+                    label = "Minimal Composite Risk"
+                else:
+                    label = "Lower Composite Risk"
+            elif feat == "immunized" and val == 1:
+                label = "Immunization" # Removed 'status' to be punchier
+            elif feat == "socioeconomic" and val > 0:
+                label = "Socioeconomic Stability"
+
+        # SPECIAL HANDLING: If this is "cumulative_risk_flags", customize the recommendation to list the specific factors
+        if feat == "cumulative_risk_flags":
+            if active_risk_flags:
+                rec_text = "Reflects combined impact of: " + ", ".join(active_risk_flags) + "."
+            else:
+                if direction == "Decrease":
+                     rec_text = "Absence of multiple compounded health risks reduces overall mortality probability."
+                else:
+                     rec_text = "General combined risk score derived from multiple health indicators."
+
         if direction == "Increase":
-            bullets.append(f"{label}: below/absent or suboptimal — this likely raises risk.")
+            risk_factors.append(label)
             recommendations.append({"feature": label, "recommendation": rec_text})
             positive_sum += abs(contrib)
         elif direction == "Decrease":
-            bullets.append(f"{label}: appears protective and lowers risk.")
-        else:
-            bullets.append(f"{label}: limited impact on this prediction.")
+            protective_factors.append(label)
+        
         humanified.append({
             "feature": feat,
             "label": label,
@@ -730,7 +798,64 @@ def explain_local_prediction(input_df):
             "recommendation": rec_text
         })
 
-    summary = " ".join(bullets) if bullets else "No specific risk drivers identified."
+    # --- Generate Narrative Summary ---
+    
+    # 1. Deduplicate concepts for the summary (e.g. don't say "Nutrition" AND "Poor Nutrition")
+    summary_concepts = set()
+    summary_items = []
+    
+    concept_map = {
+        "nutrition": "nutrition", "risk_poor_nutrition": "nutrition",
+        "birth_weight": "bw", "risk_low_bw": "bw", "risk_very_low_bw": "bw",
+        "maternal_age": "age", "risk_teen_mom": "age", "risk_advanced_mom": "age",
+        "prenatal_visits": "visits", "risk_no_visits": "visits",
+        "socioeconomic": "socio", "socio_nut_risk": "socio"
+    }
+
+    # Sort by importance
+    sorted_human = sorted(humanified, key=lambda x: abs(x["contribution"]), reverse=True)
+    
+    for item in sorted_human:
+        # Stop after 3 key points to keep it concise
+        if len(summary_items) >= 3:
+            break
+            
+        feat_key = item["feature"]
+        concept = concept_map.get(feat_key, feat_key)
+        
+        if concept not in summary_concepts:
+            summary_concepts.add(concept)
+            summary_items.append(item)
+
+    # 2. Build the sentence
+    if not summary_items:
+        summary = "No specific dominant factors identified."
+    else:
+        # Primary driver
+        top = summary_items[0]
+        direction_text = "raising" if top["direction"] == "Increase" else "lowering"
+        effect = "risk"
+        
+        sentences = []
+        sentences.append(f"The prediction is primarily influenced by **{top['label']}**, which is {direction_text} the estimated {effect}.")
+        
+        # Secondary drivers
+        if len(summary_items) > 1:
+            rest = summary_items[1:]
+            
+            # Group by direction to form a coherent second sentence
+            same_dir = [i["label"] for i in rest if i["direction"] == top["direction"]]
+            diff_dir = [i["label"] for i in rest if i["direction"] != top["direction"]]
+            
+            if same_dir:
+                text = ", ".join(f"**{x}**" for x in same_dir)
+                sentences.append(f"This is further supported by {text}.")
+            
+            if diff_dir:
+                text = ", ".join(f"**{x}**" for x in diff_dir)
+                sentences.append(f"However, **{text}** helps to mitigate the overall risk.")
+
+        summary = " ".join(sentences)
 
     # Calculate scale for bars
     max_contrib = max([abs(float(x.get("contribution", 0.0))) for x in standardized_feats] + [0.001])
@@ -754,53 +879,53 @@ def explain_local_prediction(input_df):
             effect_text = "Reducing Risk"
             
         list_items_html += (
-            f"<div style='margin-bottom:12px; padding:10px; background:white; border-radius:8px; border:1px solid #e5e7eb'>"
-                f"<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:4px'>"
-                    f"<span style='font-weight:600; color:#1f2937'>{it['label']}</span>"
-                    f"<span style='font-size:12px; font-weight:700; color:{bar_color}'>{icon} {effect_text}</span>"
+            f"<div class='mb-3 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700'>"
+                f"<div class='flex justify-between items-center mb-1'>"
+                    f"<span class='font-semibold text-gray-800 dark:text-gray-200'>{it['label']}</span>"
+                    f"<span class='text-xs font-bold' style='color:{bar_color}'>{icon} {effect_text}</span>"
                 f"</div>"
                 
-                f"<div style='display:flex; align-items:center; gap:10px; font-size:12px; margin-bottom:4px'>"
-                    f"<div style='flex-grow:1; background:#f3f4f6; height:8px; border-radius:4px; overflow:hidden'>"
-                        f"<div style='width:{pct}%; height:100%; background:{bar_color}; border-radius:4px'></div>"
+                f"<div class='flex items-center gap-2.5 text-xs mb-1'>"
+                    f"<div class='flex-grow bg-gray-100 dark:bg-gray-700 h-2 rounded overflow-hidden'>"
+                        f"<div class='h-full rounded' style='width:{pct}%; background:{bar_color}'></div>"
                     f"</div>"
-                    f"<div style='min-width:40px; text-align:right; font-weight:600; color:#4b5563'>{it['relative_importance_pct']}%</div>"
+                    f"<div class='min-w-[40px] text-right font-semibold text-gray-600 dark:text-gray-400'>{it['relative_importance_pct']}%</div>"
                 f"</div>"
                 
-                f"<div style='font-size:13px; color:#4b5563; margin-top:4px'>"
+                f"<div class='text-xs text-gray-600 dark:text-gray-400 mt-1'>"
                     f"{it['recommendation']}"
                 f"</div>"
             f"</div>"
         )
 
-    recommendations_html = "".join([f"<li style='margin-bottom:4px'>• {r['recommendation']}</li>" for r in recommendations[:3]])
+    recommendations_html = "".join([f"<li class='mb-1'>• {r['recommendation']}</li>" for r in recommendations[:3]])
     tech_json = json.dumps({"feature_contributions": standardized_feats}, indent=2)
     
     # Method display name
     method_disp = "SMOTE-Enhanced SHAP" if method == "shap" else method.replace("_", " ").title()
 
     ui_html = (
-        f"<div style='font-family:sans-serif'>"
-            f"<div style='display:flex; align-items:center; justify-content:space-between; margin-bottom:12px'>"
-                f"<h4 style='font-weight:700; font-size:16px; margin:0; color:#1f2937'>Contribution Analysis</h4>"
-                f"<span style='font-size:10px; text-transform:uppercase; letter-spacing:0.5px; background:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:12px; font-weight:700'>{method_disp}</span>"
+        f"<div class='font-sans'>"
+            f"<div class='flex items-center justify-between mb-3'>"
+                f"<h4 class='font-bold text-base m-0 text-gray-800 dark:text-gray-100'>Contribution Analysis</h4>"
+                f"<span class='text-[10px] uppercase tracking-wide bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full font-bold'>{method_disp}</span>"
             f"</div>"
             
-            f"<div style='background:#f9fafb; padding:12px; border-radius:8px; border:1px solid #e5e7eb; margin-bottom:16px'>"
-                f"<div style='font-size:13px; color:#374151; font-weight:600; margin-bottom:4px'>Summary</div>"
-                f"<div style='font-size:14px; color:#111827'>{summary}</div>"
+            f"<div class='bg-gray-50 dark:bg-gray-800/50 p-3 rounded-lg border border-gray-200 dark:border-gray-700 mb-4'>"
+                f"<div class='text-xs text-gray-700 dark:text-gray-300 font-semibold mb-1'>Summary</div>"
+                f"<div class='text-sm text-gray-900 dark:text-gray-100'>{summary}</div>"
             f"</div>"
 
-            f"<div style='margin-bottom:16px'>{list_items_html}</div>"
+            f"<div class='mb-4'>{list_items_html}</div>"
 
-            f"<div style='border-top:1px solid #e5e7eb; padding-top:12px'>"
-                f"<div style='font-size:13px; font-weight:600; color:#374151; margin-bottom:6px'>Top Recommendations</div>"
-                f"<ul style='padding-left:14px; margin:0; font-size:13px; color:#4b5563; line-height:1.5'>{recommendations_html or '<li>No specific actions required.</li>'}</ul>"
+            f"<div class='border-t border-gray-200 dark:border-gray-700 pt-3'>"
+                f"<div class='text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1.5'>Top Recommendations</div>"
+                f"<ul class='pl-3.5 m-0 text-xs text-gray-600 dark:text-gray-400 leading-relaxed'>{recommendations_html or '<li>No specific actions required.</li>'}</ul>"
             f"</div>"
             
-            f"<details style='margin-top:12px; border-top:1px solid #e5e7eb; padding-top:8px'>"
-                f"<summary style='cursor:pointer; font-size:12px; font-weight:600; color:#6b7280; user-select:none'>Show Technical Data</summary>"
-                f"<pre style='font-size:11px; white-space:pre-wrap; padding:8px; background:#111827; color:#10b981; border-radius:6px; margin-top:6px; overflow-x:auto'>{tech_json}</pre>"
+            f"<details class='mt-3 border-t border-gray-200 dark:border-gray-700 pt-2'>"
+                f"<summary class='cursor-pointer text-xs font-semibold text-gray-500 dark:text-gray-400 select-none'>Show Technical Data</summary>"
+                f"<pre class='text-[11px] whitespace-pre-wrap p-2 bg-gray-900 text-green-400 rounded-md mt-1.5 overflow-x-auto'>{tech_json}</pre>"
             f"</details>"
         f"</div>"
     )
@@ -812,7 +937,6 @@ def explain_local_prediction(input_df):
         "feature_contributions": standardized_feats,
         "feature_importance_human": humanified,
         "summary": summary,
-        "bullets": bullets,
         "recommendations": recommendations,
         "ui_html": ui_html,
         "severity_score": severity_score
@@ -956,7 +1080,7 @@ def save_prediction_to_history(features, probability, prediction, risk_category,
         cur = conn.cursor()
         user_id = _current_user_id()
         session_id = _ensure_session_id()
-        ts = datetime.utcnow().isoformat()
+        ts = datetime.now(timezone.utc).isoformat()
         cur.execute("""
             INSERT INTO history
             (user_id, session_id, timestamp, features_json, probability, prediction, risk_category,
@@ -1020,7 +1144,7 @@ def api_register():
     try:
         pw_hash = generate_password_hash(password)
         cur.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                    (username, pw_hash, datetime.utcnow().isoformat()))
+                    (username, pw_hash, datetime.now(timezone.utc).isoformat()))
         conn.commit()
         user_id = cur.lastrowid
         flask_session["user_id"] = user_id
@@ -1197,7 +1321,7 @@ def api_history_merge():
     session_id = _ensure_session_id()
     for e in entries:
         try:
-            ts = e.get("timestamp") or datetime.utcnow().isoformat()
+            ts = e.get("timestamp") or datetime.now(timezone.utc).isoformat()
             features = e.get("input_json") or e.get("features") or e.get("inputs") or {}
             try:
                 features_json = json.dumps(features, default=str)

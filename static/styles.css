@@ -258,45 +258,9 @@ input[type="number"] {
 
 /* ----------------------------------------------------------
    EXPLANATION PANEL (dark-mode overrides)
-   The HF/SHAP explanation HTML contains inline styles with light colors.
-   These rules force readable colors in dark mode and adjust pre blocks.
+   (Removed as app.py now generates dark-friendly Tailwind classes)
 ----------------------------------------------------------- */
-.dark #explainText {
-  color: #e5e7eb !important;
-}
 
-.dark #explainText div,
-.dark #explainText p,
-.dark #explainText span,
-.dark #explainText small,
-.dark #explainText ul,
-.dark #explainText li {
-  color: inherit !important;
-}
-
-.dark #explainText li {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04) !important;
-}
-
-.dark #explainText pre {
-  background: #0b1220 !important;
-  color: #e5e7eb !important;
-  border-radius: 6px !important;
-  padding: 8px !important;
-  border: 1px solid rgba(255, 255, 255, 0.03) !important;
-}
-
-.dark #explainText small {
-  color: #d1d5db !important;
-}
-
-/* Make red-flag and legend items more visible */
-.dark #explainText [style*="#ef4444"],
-.dark #explainText [style*="red flags"],
-.dark #explainText .red-flag {
-  color: #fecaca !important;
-  /* light red for contrast */
-}
 
 .cm-modal h3 {
   font-weight: 700;

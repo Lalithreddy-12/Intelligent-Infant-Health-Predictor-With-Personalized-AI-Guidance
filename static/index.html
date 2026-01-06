@@ -186,26 +186,19 @@
           <!-- Results -->
           <div id="resultCard" class="mt-8 hidden card-elevated rounded-3xl p-8 shadow-xl">
 
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-              <div class="flex flex-col items-center justify-center p-6 bg-white dark:bg-gray-800 rounded-2xl">
-                <svg class="circular-chart" viewBox="0 0 36 36" width="140" height="140">
-                  <path class="circle-bg"
-                    d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831a 15.9155 15.9155 0 0 1 0 -31.831" />
-                  <path id="meterCircle" class="circle" stroke="#10b981"
-                    d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831a 15.9155 15.9155 0 0 1 0 -31.831"
-                    stroke-dasharray="0, 100"></path>
-                </svg>
-              </div>
-
-              <div class="md:col-span-2">
+            <!-- Simplified Result Layout -->
+            <div class="mb-8">
+              <div class="text-center">
                 <span id="riskLabel" class="text-3xl font-bold">—</span>
                 <p id="probLabel" class="text-sm mt-2">Probability: —</p>
 
-                <div class="mt-4">
-                  <span class="text-xs">Mortality Risk</span>
-                  <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3 mt-1 overflow-hidden">
+                <div class="mt-4 max-w-md mx-auto">
+                  <div class="flex justify-between items-end mb-1">
+                    <span class="text-xs">Mortality Risk</span>
+                  </div>
+                  <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-4 overflow-hidden shadow-inner">
                     <div id="probBar"
-                      class="h-3 rounded-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 transition-all duration-300"
+                      class="h-full rounded-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 transition-all duration-500 ease-out"
                       style="width:0%"></div>
                   </div>
                   <div class="flex justify-between text-xs text-gray-600 dark:text-gray-400 mt-1">

@@ -369,7 +369,7 @@ const predictBtn = document.getElementById("predict");
 const clearBtn = document.getElementById("clear");
 const resultCard = document.getElementById("resultCard");
 const planContainer = document.getElementById("planContainer");
-const meterCircle = document.getElementById("meterCircle");
+// meterCircle removed
 const riskLabel = document.getElementById("riskLabel");
 const probLabel = document.getElementById("probLabel");
 const probBar = document.getElementById("probBar");
@@ -380,13 +380,7 @@ const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
 
 // helpers
-function setMeter(percent) {
-  const circumference = 100;
-  const dash = ((percent || 0) / 100) * circumference;
-  let color = "#10b981";
-  if (percent >= 70) color = "#ef4444"; else if (percent >= 40) color = "#f59e0b";
-  if (meterCircle) { meterCircle.style.stroke = color; meterCircle.setAttribute("stroke-dasharray", `${dash}, ${circumference}`); }
-}
+
 
 function saveHistory(entry) {
   try {
@@ -990,10 +984,10 @@ if (isBabyOf && patientNameInput) {
   isBabyOf.addEventListener("change", () => {
     if (isBabyOf.checked) {
       if (nameLabel) nameLabel.textContent = "Mother's Name";
-      patientNameInput.placeholder = "e.g. Anitha";
+      patientNameInput.placeholder = "e.g. Nancy";
     } else {
       if (nameLabel) nameLabel.textContent = "Patient Name (Optional)";
-      patientNameInput.placeholder = "e.g. Baby Doe";
+      patientNameInput.placeholder = "e.g. Baby Lucy";
     }
   });
 }
@@ -1046,7 +1040,7 @@ predictBtn && predictBtn.addEventListener("click", async () => {
     const prob = (data.mortality_risk_probability != null) ? Number(data.mortality_risk_probability) * 100 : null;
     const pred = data.mortality_prediction;
     const riskText = (pred === 1 || (prob !== null && prob >= 60)) ? "High" : (prob !== null && prob >= 35 ? "Medium" : "Low");
-    setMeter(prob || 0);
+    // setMeter removed
     if (riskLabel) riskLabel.textContent = `Risk: ${riskText}`;
     if (probLabel) probLabel.textContent = `Probability: ${prob !== null ? prob.toFixed(2) + "%" : "N/A"} `;
     if (probBar) probBar.style.width = `${prob !== null ? Math.min(100, prob) : 0}% `;
