@@ -83,8 +83,8 @@ Child-Mortality-Prediction/
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-username/child-mortality-prediction.git
-cd child-mortality-prediction
+git clone https://github.com/your-username/Intelligent-Infant-Health-Predictor-With-Personalized-AI-Guidance.git
+cd Intelligent-Infant-Health-Predictor-With-Personalized-AI-Guidance
 ```
 
 ### 2. Create Virtual Environment
