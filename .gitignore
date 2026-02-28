@@ -89,6 +89,7 @@ saved_model/
 # Scikit-learn / Joblib models
 *.joblib
 *.pkl
+!models/*.pkl
 
 # HuggingFace Transformers
 *.bin
