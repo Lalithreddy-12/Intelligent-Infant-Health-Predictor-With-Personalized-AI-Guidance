@@ -6,16 +6,9 @@ joblib==1.5.2
 
 # ML / modelling
 scikit-learn==1.7.2
-imbalanced-learn==0.14.0
 
 # Gradient boosting libraries
-xgboost==3.1.2
-lightgbm==4.6.0
 catboost==1.2.8
-
-# Explainability & plotting
-shap==0.50.0
-matplotlib==3.10.7
 
 # API & web
 Flask==3.1.2
@@ -26,6 +19,3 @@ gunicorn==21.2.0
 requests==2.32.5
 python-dotenv==1.2.1
 huggingface-hub==1.2.1
-
-# Optional: pin a typical test/dev helper (uncomment if used)
-# pytest==8.4.0
